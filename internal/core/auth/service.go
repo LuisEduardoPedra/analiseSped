@@ -4,6 +4,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"log"
 	"time"
 
 	"cloud.google.com/go/firestore"
@@ -44,6 +45,9 @@ func (s *service) Login(ctx context.Context, username, password string) (string,
 		return "", errors.New("usuário ou senha inválidos")
 	}
 	if err != nil {
+		log.Printf("Erro detalhado do Firestore: %v", err)
+
+		// 3. A mensagem para o usuário continua a mesma
 		return "", errors.New("erro ao consultar o banco de dados")
 	}
 

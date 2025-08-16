@@ -4,47 +4,51 @@ package main
 import (
 	"context"
 	"log"
+	"os"
 
 	"cloud.google.com/go/firestore"
-	firebase "firebase.google.com/go"
 	"github.com/LuisEduardoPedra/analiseSped/internal/api/handlers"
 	"github.com/LuisEduardoPedra/analiseSped/internal/api/middleware" // Importa o middleware
 	"github.com/LuisEduardoPedra/analiseSped/internal/core/analysis"
 	"github.com/LuisEduardoPedra/analiseSped/internal/core/auth" // Importa o serviço de auth
 	"github.com/gin-gonic/gin"
-	"google.golang.org/api/option"
 )
 
-// Função para iniciar o cliente do Firestore
 func initFirestoreClient(ctx context.Context) *firestore.Client {
-	sa := option.WithCredentialsFile("credentials.json")
-	app, err := firebase.NewApp(ctx, nil, sa)
+	// O projectID será detectado automaticamente do ambiente do Google Cloud.
+	projectID := "analise-sped-db"
+
+	// O databaseID é o nome que você deu ao seu novo banco de dados.
+	databaseID := "analise-sped-db"
+
+	// Usamos NewClientWithDatabase para conectar a um banco de dados nomeado.
+	// Esta é a função correta.
+	client, err := firestore.NewClientWithDatabase(ctx, projectID, databaseID)
 	if err != nil {
-		log.Fatalf("Erro ao inicializar app Firebase: %v\n", err)
+		log.Fatalf("Erro ao inicializar cliente Firestore para o banco '%s': %v\n", databaseID, err)
 	}
 
-	client, err := app.Firestore(ctx)
-	if err != nil {
-		log.Fatalf("Erro ao inicializar cliente Firestore: %v\n", err)
-	}
+	log.Printf("Conectado com sucesso ao Firestore, banco de dados: %s", databaseID)
 	return client
 }
 
 func main() {
 	ctx := context.Background()
 	firestoreClient := initFirestoreClient(ctx)
-	defer firestoreClient.Close() // Garante que a conexão será fechada ao sair.
+	defer firestoreClient.Close()
 
-	// --- 1. Inicialização das Dependências ---
+	// A partir daqui, o resto da função main continua exatamente igual.
+	// ... (código inalterado) ...
 	analysisService := analysis.NewService()
-	authService := auth.NewService(firestoreClient) // Cria o serviço de auth
+	// O serviço de autenticação precisa do firestoreClient, que agora está sendo
+	// inicializado corretamente.
+	authService := auth.NewService(firestoreClient)
 
 	analysisHandler := handlers.NewAnalysisHandler(analysisService)
-	authHandler := handlers.NewAuthHandler(authService) // Cria o handler de auth
+	authHandler := handlers.NewAuthHandler(authService)
 
-	// --- 2. Configuração do Servidor Web (Gin) ---
 	router := gin.Default()
-	router.Use(func(c *gin.Context) { // Middleware de CORS
+	router.Use(func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization")
@@ -55,29 +59,27 @@ func main() {
 		c.Next()
 	})
 
-	// --- 3. Definição das Rotas da API ---
 	apiV1 := router.Group("/api/v1")
 	{
-		// Rota pública para login
 		apiV1.POST("/login", authHandler.Login)
-
-		// Cria um novo grupo de rotas que usa o middleware de autenticação
 		protected := apiV1.Group("/")
 		protected.Use(middleware.AuthMiddleware())
 		{
-			// A rota de análise agora está dentro do grupo protegido
 			protected.POST("/analyze", analysisHandler.HandleAnalysis)
 		}
 	}
-
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "UP"})
 	})
 
-	// --- 4. Inicialização do Servidor ---
-	port := ":8080"
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
 	log.Printf("🚀 Servidor iniciado e escutando na porta %s", port)
-	if err := router.Run(port); err != nil {
+
+	if err := router.Run(":" + port); err != nil {
 		log.Fatal("Falha ao iniciar o servidor: ", err)
 	}
 }
