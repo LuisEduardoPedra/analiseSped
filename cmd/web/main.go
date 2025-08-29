@@ -28,6 +28,11 @@ func initFirestoreClient(ctx context.Context) *firestore.Client {
 }
 
 func main() {
+	// Verifica se a variável de ambiente JWT_SECRET está configurada
+	if os.Getenv("JWT_SECRET") == "" {
+		log.Fatal("FATAL: Variável de ambiente JWT_SECRET não está configurada.")
+	}
+
 	responses.InitLogger()
 	ctx := context.Background()
 	firestoreClient := initFirestoreClient(ctx)
@@ -53,10 +58,12 @@ func main() {
 	{
 		apiV1.POST("/login", authHandler.Login)
 		protected := apiV1.Group("/")
+		// 1. Aplica a autenticação geral para todas as rotas do grupo
 		protected.Use(middleware.AuthMiddleware())
 		{
-			protected.POST("/analyze/icms", analysisHandler.HandleAnalysisIcms)
-			protected.POST("/analyze/ipi-st", analysisHandler.HandleAnalysisIpiSt)
+			// 2. Aplica a verificação de permissão específica para cada rota
+			protected.POST("/analyze/icms", middleware.PermissionMiddleware("analise-icms"), analysisHandler.HandleAnalysisIcms)
+			protected.POST("/analyze/ipi-st", middleware.PermissionMiddleware("analise-ipi-st"), analysisHandler.HandleAnalysisIpiSt)
 		}
 	}
 	router.GET("/health", func(c *gin.Context) {

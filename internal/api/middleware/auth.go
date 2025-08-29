@@ -2,16 +2,19 @@
 package middleware
 
 import (
+	"fmt"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// Use a mesma chave secreta definida no serviço de autenticação.
-var jwtSecret = []byte("SUA_CHAVE_SUPER_SECRETA_MUDE_ISSO")
+// A chave secreta também é lida da variável de ambiente aqui.
+var jwtSecret = []byte(os.Getenv("JWT_SECRET"))
 
+// AuthMiddleware verifica se o token JWT é válido.
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
@@ -29,7 +32,7 @@ func AuthMiddleware() gin.HandlerFunc {
 		tokenString := parts[1]
 		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, http.ErrAbortHandler
+				return nil, fmt.Errorf("método de assinatura inesperado: %v", token.Header["alg"])
 			}
 			return jwtSecret, nil
 		})
@@ -39,6 +42,40 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
+		// Armazena os claims no contexto para uso posterior, se necessário
+		if claims, ok := token.Claims.(jwt.MapClaims); ok {
+			c.Set("user_claims", claims)
+		}
+
 		c.Next()
+	}
+}
+
+// PermissionMiddleware verifica se o usuário tem uma permissão específica.
+func PermissionMiddleware(requiredPermission string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Pega os claims do token que foram validados pelo AuthMiddleware
+		claims, exists := c.Get("user_claims")
+		if !exists {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Claims do usuário não encontrados"})
+			return
+		}
+
+		mapClaims := claims.(jwt.MapClaims)
+		roles, ok := mapClaims["roles"].([]interface{})
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Permissões não encontradas no token"})
+			return
+		}
+
+		// Verifica se a permissão necessária está na lista de permissões do usuário
+		for _, role := range roles {
+			if roleStr, ok := role.(string); ok && roleStr == requiredPermission {
+				c.Next()
+				return
+			}
+		}
+
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Acesso negado: permissão necessária ausente"})
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"os"
 	"time"
 
 	"cloud.google.com/go/firestore"
@@ -13,9 +14,8 @@ import (
 	"google.golang.org/api/iterator"
 )
 
-// Defina uma chave secreta para assinar os tokens.
-// Em produção, isso DEVE vir de uma variável de ambiente, nunca hardcoded.
-var jwtSecret = []byte("SUA_CHAVE_SUPER_SECRETA_MUDE_ISSO")
+// A chave secreta agora é lida de uma variável de ambiente.
+var jwtSecret = []byte(os.Getenv("JWT_SECRET"))
 
 type Service interface {
 	Login(ctx context.Context, username, password string) (string, error)
@@ -31,8 +31,9 @@ func NewService(db *firestore.Client) Service {
 
 // User representa a estrutura de um usuário no Firestore.
 type User struct {
-	Username     string `firestore:"username"`
-	PasswordHash string `firestore:"passwordHash"`
+	Username     string   `firestore:"username"`
+	PasswordHash string   `firestore:"passwordHash"`
+	Roles        []string `firestore:"roles"` // Array de permissões
 }
 
 func (s *service) Login(ctx context.Context, username, password string) (string, error) {
@@ -46,8 +47,6 @@ func (s *service) Login(ctx context.Context, username, password string) (string,
 	}
 	if err != nil {
 		log.Printf("Erro detalhado do Firestore: %v", err)
-
-		// 3. A mensagem para o usuário continua a mesma
 		return "", errors.New("erro ao consultar o banco de dados")
 	}
 
@@ -59,13 +58,13 @@ func (s *service) Login(ctx context.Context, username, password string) (string,
 	// 2. Comparar a senha fornecida com o hash armazenado.
 	err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password))
 	if err != nil {
-		// Se err != nil, a senha está incorreta.
 		return "", errors.New("usuário ou senha inválidos")
 	}
 
-	// 3. Gerar o Token JWT.
+	// 3. Gerar o Token JWT com as permissões (roles).
 	claims := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"username": user.Username,
+		"roles":    user.Roles,                            // Adiciona as permissões ao token
 		"exp":      time.Now().Add(time.Hour * 24).Unix(), // Token expira em 24 horas
 	})
 
