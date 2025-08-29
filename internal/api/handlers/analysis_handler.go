@@ -6,31 +6,33 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/LuisEduardoPedra/analiseSped/internal/api/responses"
 	"github.com/LuisEduardoPedra/analiseSped/internal/core/analysis"
 	"github.com/gin-gonic/gin"
 )
 
-// (A struct AnalysisHandler e a função NewAnalysisHandler não mudam)
+// AnalysisHandler handles analysis-related API requests.
 type AnalysisHandler struct {
 	service analysis.Service
 }
 
+// NewAnalysisHandler creates a new analysis handler.
 func NewAnalysisHandler(service analysis.Service) *AnalysisHandler {
 	return &AnalysisHandler{
 		service: service,
 	}
 }
 
-func (h *AnalysisHandler) HandleAnalysis(c *gin.Context) {
-	// 1. Receber os arquivos (lógica inalterada)
+// HandleAnalysisIcms handles ICMS analysis requests.
+func (h *AnalysisHandler) HandleAnalysisIcms(c *gin.Context) {
 	spedFileHeader, err := c.FormFile("spedFile")
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Arquivo SPED não encontrado ou inválido"})
+		responses.Error(c, http.StatusBadRequest, "Arquivo SPED não encontrado ou inválido")
 		return
 	}
 	spedFile, err := spedFileHeader.Open()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Não foi possível abrir o arquivo SPED"})
+		responses.Error(c, http.StatusInternalServerError, "Não foi possível abrir o arquivo SPED")
 		return
 	}
 	defer spedFile.Close()
@@ -38,32 +40,24 @@ func (h *AnalysisHandler) HandleAnalysis(c *gin.Context) {
 	form, _ := c.MultipartForm()
 	xmlFileHeaders := form.File["xmlFiles"]
 	if len(xmlFileHeaders) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Nenhum arquivo XML foi enviado"})
+		responses.Error(c, http.StatusBadRequest, "Nenhum arquivo XML foi enviado")
 		return
 	}
 
 	var xmlReaders []io.Reader
-	// Usamos um loop anônimo com `defer` para garantir que todos os arquivos sejam fechados.
-	func() {
-		for _, header := range xmlFileHeaders {
-			file, err := header.Open()
-			if err != nil {
-				// Este defer não será executado se err != nil, então está seguro.
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Não foi possível abrir um dos arquivos XML"})
-				return
-			}
-			defer file.Close()
-			xmlReaders = append(xmlReaders, file)
+	for _, header := range xmlFileHeaders {
+		file, err := header.Open()
+		if err != nil {
+			responses.Error(c, http.StatusInternalServerError, "Não foi possível abrir um dos arquivos XML")
+			return
 		}
-	}()
+		defer file.Close()
+		xmlReaders = append(xmlReaders, file)
+	}
 
-	// --- ALTERAÇÕES AQUI ---
-	// 2. Receber a lista de CFOPs do formulário.
-	// O frontend deve enviar um campo de texto chamado 'cfopsIgnorados' com os valores separados por vírgula.
 	cfopsStr := c.PostForm("cfopsIgnorados")
 	var cfopsIgnorados []string
 	if cfopsStr != "" {
-		// Divide a string pela vírgula e remove espaços em branco de cada CFOP.
 		parts := strings.Split(cfopsStr, ",")
 		for _, part := range parts {
 			trimmed := strings.TrimSpace(part)
@@ -72,14 +66,60 @@ func (h *AnalysisHandler) HandleAnalysis(c *gin.Context) {
 			}
 		}
 	}
-	// Se 'cfopsIgnorados' estiver vazio, uma lista vazia será passada, o que está correto.
 
-	// 3. Chamar o serviço com a lista de CFOPs.
-	resultados, err := h.service.AnalisarArquivos(spedFile, xmlReaders, cfopsIgnorados)
+	resultados, err := h.service.AnalyzeICMSFiles(spedFile, xmlReaders, cfopsIgnorados)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		responses.Error(c, http.StatusInternalServerError, "Erro na análise de ICMS", err.Error())
 		return
 	}
 
-	c.JSON(http.StatusOK, resultados)
+	responses.Success(c, resultados, "Análise de ICMS concluída com sucesso")
+}
+
+// HandleAnalysisIpiSt handles IPI and ST analysis requests.
+func (h *AnalysisHandler) HandleAnalysisIpiSt(c *gin.Context) {
+	spedFileHeader, err := c.FormFile("spedFile")
+	if err != nil {
+		responses.Error(c, http.StatusBadRequest, "Arquivo SPED não encontrado ou inválido")
+		return
+	}
+	spedFile, err := spedFileHeader.Open()
+	if err != nil {
+		responses.Error(c, http.StatusInternalServerError, "Não foi possível abrir o arquivo SPED")
+		return
+	}
+	defer spedFile.Close()
+
+	form, _ := c.MultipartForm()
+	xmlFileHeaders := form.File["xmlFiles"]
+	if len(xmlFileHeaders) == 0 {
+		responses.Error(c, http.StatusBadRequest, "Nenhum arquivo XML foi enviado")
+		return
+	}
+
+	var xmlReaders []io.Reader
+	var closers []io.Closer
+	defer func() {
+		for _, closer := range closers {
+			closer.Close()
+		}
+	}()
+
+	for _, header := range xmlFileHeaders {
+		file, err := header.Open()
+		if err != nil {
+			responses.Error(c, http.StatusInternalServerError, "Não foi possível abrir um dos arquivos XML")
+			return
+		}
+		xmlReaders = append(xmlReaders, file)
+		closers = append(closers, file)
+	}
+
+	resultados, err := h.service.AnalyzeIPISTFiles(spedFile, xmlReaders)
+	if err != nil {
+		responses.Error(c, http.StatusInternalServerError, "Erro na análise de IPI e ST", err.Error())
+		return
+	}
+
+	responses.Success(c, resultados, "Análise de IPI e ST concluída com sucesso")
 }

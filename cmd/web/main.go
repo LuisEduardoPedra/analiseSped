@@ -8,42 +8,32 @@ import (
 
 	"cloud.google.com/go/firestore"
 	"github.com/LuisEduardoPedra/analiseSped/internal/api/handlers"
-	"github.com/LuisEduardoPedra/analiseSped/internal/api/middleware" // Importa o middleware
+	"github.com/LuisEduardoPedra/analiseSped/internal/api/middleware"
+	"github.com/LuisEduardoPedra/analiseSped/internal/api/responses"
 	"github.com/LuisEduardoPedra/analiseSped/internal/core/analysis"
-	"github.com/LuisEduardoPedra/analiseSped/internal/core/auth" // Importa o serviço de auth
+	"github.com/LuisEduardoPedra/analiseSped/internal/core/auth"
 	"github.com/gin-gonic/gin"
 )
 
+// initFirestoreClient initializes the Firestore client.
 func initFirestoreClient(ctx context.Context) *firestore.Client {
-	// O projectID será detectado automaticamente do ambiente do Google Cloud.
 	projectID := "analise-sped-db"
-
-	// O databaseID é o nome que você deu ao seu novo banco de dados.
 	databaseID := "analise-sped-db"
-
-	// Usamos NewClientWithDatabase para conectar a um banco de dados nomeado.
-	// Esta é a função correta.
 	client, err := firestore.NewClientWithDatabase(ctx, projectID, databaseID)
 	if err != nil {
 		log.Fatalf("Erro ao inicializar cliente Firestore para o banco '%s': %v\n", databaseID, err)
 	}
-
 	log.Printf("Conectado com sucesso ao Firestore, banco de dados: %s", databaseID)
 	return client
 }
 
 func main() {
+	responses.InitLogger()
 	ctx := context.Background()
 	firestoreClient := initFirestoreClient(ctx)
 	defer firestoreClient.Close()
-
-	// A partir daqui, o resto da função main continua exatamente igual.
-	// ... (código inalterado) ...
 	analysisService := analysis.NewService()
-	// O serviço de autenticação precisa do firestoreClient, que agora está sendo
-	// inicializado corretamente.
 	authService := auth.NewService(firestoreClient)
-
 	analysisHandler := handlers.NewAnalysisHandler(analysisService)
 	authHandler := handlers.NewAuthHandler(authService)
 
@@ -65,7 +55,8 @@ func main() {
 		protected := apiV1.Group("/")
 		protected.Use(middleware.AuthMiddleware())
 		{
-			protected.POST("/analyze", analysisHandler.HandleAnalysis)
+			protected.POST("/analyze/icms", analysisHandler.HandleAnalysisIcms)
+			protected.POST("/analyze/ipi-st", analysisHandler.HandleAnalysisIpiSt)
 		}
 	}
 	router.GET("/health", func(c *gin.Context) {
