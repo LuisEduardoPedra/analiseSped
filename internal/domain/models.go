@@ -1,7 +1,10 @@
 // package domain/models.go
 package domain
 
-import "encoding/xml"
+import (
+	"encoding/xml"
+	"time"
+)
 
 // AnalysisType defines the type of analysis.
 type AnalysisType string
@@ -132,4 +135,24 @@ type DetXML struct {
 			} `xml:"ICMSSN101"`
 		} `xml:"ICMS"`
 	} `xml:"imposto"`
+}
+
+// --- Modelos de Conversor Francesinha ---
+
+// Lancamento representa uma linha de lançamento do arquivo de entrada.
+type Lancamento struct {
+	DataLiquidacao time.Time
+	Descricao      string
+	Valor          float64
+	Historico      string
+}
+
+// OutputRow representa uma linha do arquivo CSV de saída.
+type OutputRow struct {
+	Operacao         string
+	Data             string
+	DescricaoCredito string
+	ContaCredito     string
+	Valor            string
+	Historico        string
 }

@@ -12,10 +12,10 @@ import (
 	"github.com/LuisEduardoPedra/analiseSped/internal/api/responses"
 	"github.com/LuisEduardoPedra/analiseSped/internal/core/analysis"
 	"github.com/LuisEduardoPedra/analiseSped/internal/core/auth"
+	"github.com/LuisEduardoPedra/analiseSped/internal/core/converter"
 	"github.com/gin-gonic/gin"
 )
 
-// initFirestoreClient initializes the Firestore client.
 func initFirestoreClient(ctx context.Context) *firestore.Client {
 	projectID := "analise-sped-db"
 	databaseID := "analise-sped-db"
@@ -28,7 +28,6 @@ func initFirestoreClient(ctx context.Context) *firestore.Client {
 }
 
 func main() {
-	// Verifica se a variável de ambiente JWT_SECRET está configurada
 	if os.Getenv("JWT_SECRET") == "" {
 		log.Fatal("FATAL: Variável de ambiente JWT_SECRET não está configurada.")
 	}
@@ -37,15 +36,19 @@ func main() {
 	ctx := context.Background()
 	firestoreClient := initFirestoreClient(ctx)
 	defer firestoreClient.Close()
+
 	analysisService := analysis.NewService()
 	authService := auth.NewService(firestoreClient)
+	converterService := converter.NewService()
+
 	analysisHandler := handlers.NewAnalysisHandler(analysisService)
 	authHandler := handlers.NewAuthHandler(authService)
+	converterHandler := handlers.NewConverterHandler(converterService)
 
 	router := gin.Default()
 	router.Use(func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		c.Writer.Header().Set("Access-Control-Allow-Origin", "https://analise-sped-frontend.vercel.app")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization")
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)
@@ -57,15 +60,19 @@ func main() {
 	apiV1 := router.Group("/api/v1")
 	{
 		apiV1.POST("/login", authHandler.Login)
+
 		protected := apiV1.Group("/")
-		// 1. Aplica a autenticação geral para todas as rotas do grupo
 		protected.Use(middleware.AuthMiddleware())
 		{
-			// 2. Aplica a verificação de permissão específica para cada rota
+			// Rotas de Análise
 			protected.POST("/analyze/icms", middleware.PermissionMiddleware("analise-icms"), analysisHandler.HandleAnalysisIcms)
 			protected.POST("/analyze/ipi-st", middleware.PermissionMiddleware("analise-ipi-st"), analysisHandler.HandleAnalysisIpiSt)
+
+			// Rota de Conversão
+			protected.POST("/convert/francesinha", middleware.PermissionMiddleware("converter-francesinha"), converterHandler.HandleSicrediConversion)
 		}
 	}
+
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "UP"})
 	})

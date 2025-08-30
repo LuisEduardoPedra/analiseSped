@@ -33,7 +33,7 @@ func NewService(db *firestore.Client) Service {
 type User struct {
 	Username     string   `firestore:"username"`
 	PasswordHash string   `firestore:"passwordHash"`
-	Roles        []string `firestore:"roles"` // Array de permissões
+	Roles        []string `firestore:"roles"`
 }
 
 func (s *service) Login(ctx context.Context, username, password string) (string, error) {
