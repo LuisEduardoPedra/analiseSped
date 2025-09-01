@@ -156,3 +156,22 @@ type OutputRow struct {
 	Valor            string
 	Historico        string
 }
+
+// --- Modelos de Conversor Receitas ACISA ---
+
+// ContaReceitasAcisa representa uma entrada do arquivo Contas.csv para o conversor de receitas.
+type ContaReceitasAcisa struct {
+	Code    string
+	Classif string
+	Desc    string
+}
+
+// ReceitasAcisaOutputRow representa uma linha do arquivo CSV de saída do conversor de receitas.
+type ReceitasAcisaOutputRow struct {
+	Data        string
+	Descricao   string
+	Conta       string
+	Mensalidade string
+	Pis         string
+	Historico   string
+}

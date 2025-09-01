@@ -15,16 +15,17 @@ import (
 
 	"github.com/LuisEduardoPedra/analiseSped/internal/domain"
 	"github.com/schollz/closestmatch"
-	"github.com/shakinm/xlsReader/xls" // corrigido import
+	"github.com/shakinm/xlsReader/xls"
 	"github.com/xuri/excelize/v2"
 	"golang.org/x/text/encoding/charmap"
 	"golang.org/x/text/transform"
 	"golang.org/x/text/unicode/norm"
 )
 
-// Service define a interface para o serviço de conversão de arquivos.
+// Service define a interface para os serviços de conversão de arquivos.
 type Service interface {
 	ProcessSicrediFiles(lancamentosFile io.Reader, contasFile io.Reader, lancamentosFilename string) ([]byte, error)
+	ProcessReceitasAcisaFiles(excelFile io.Reader, contasFile io.Reader, excelFilename string, classPrefixes []string) ([]byte, error)
 }
 
 type service struct{}
@@ -33,6 +34,39 @@ type service struct{}
 func NewService() Service {
 	return &service{}
 }
+
+// Funções utilitárias compartilhadas
+var nonAlphanumericRegex = regexp.MustCompile(`[^A-Z0-9 ]+`)
+var whitespaceRegex = regexp.MustCompile(`\s+`)
+
+func (svc *service) normalizeText(str string) string {
+	t := transform.Chain(norm.NFD, transform.RemoveFunc(func(r rune) bool {
+		return unicode.Is(unicode.Mn, r)
+	}))
+	result, _, _ := transform.String(t, str)
+	result = strings.ToUpper(result)
+	result = nonAlphanumericRegex.ReplaceAllString(result, " ")
+	result = whitespaceRegex.ReplaceAllString(result, " ")
+	return strings.TrimSpace(result)
+}
+
+func (svc *service) parseBRLNumber(val string) (float64, error) {
+	s := strings.TrimSpace(val)
+	if s == "" {
+		return 0.0, nil
+	}
+	s = strings.ReplaceAll(s, ".", "")
+	s = strings.ReplaceAll(s, ",", ".")
+	return strconv.ParseFloat(s, 64)
+}
+
+func (svc *service) formatTwoDecimalsComma(val float64) string {
+	return strings.Replace(fmt.Sprintf("%.2f", val), ".", ",", 1)
+}
+
+// #############################################################################
+// #                         CONVERSOR FRANCESINHA (SICREDI)                     #
+// #############################################################################
 
 // convertXLSXtoCSV converte um arquivo .xlsx para um CSV em memória.
 func (svc *service) convertXLSXtoCSV(file io.Reader) (io.Reader, error) {
@@ -64,7 +98,6 @@ func (svc *service) convertXLSXtoCSV(file io.Reader) (io.Reader, error) {
 
 // convertXLStoCSV converte um arquivo .xls para um CSV em memória.
 func (svc *service) convertXLStoCSV(file io.Reader) (io.Reader, error) {
-	// Lê tudo em memória, pois xls.OpenReader exige io.ReadSeeker
 	data, err := io.ReadAll(file)
 	if err != nil {
 		return nil, err
@@ -73,7 +106,6 @@ func (svc *service) convertXLStoCSV(file io.Reader) (io.Reader, error) {
 
 	workbook, err := xls.OpenReader(reader)
 	if err != nil {
-		// fallback: pode ser na verdade um .xlsx disfarçado
 		if _, errX := excelize.OpenReader(bytes.NewReader(data)); errX == nil {
 			return svc.convertXLSXtoCSV(bytes.NewReader(data))
 		}
@@ -124,8 +156,7 @@ func (svc *service) ProcessSicrediFiles(lancamentosFile io.Reader, contasFile io
 		return nil, fmt.Errorf("formato de arquivo de lançamentos não suportado: %s", ext)
 	}
 
-	// Carregar contas
-	contasMap, err := svc.carregarContas(contasFile)
+	contasMap, err := svc.carregarContasSicredi(contasFile)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao carregar arquivo de contas: %w", err)
 	}
@@ -136,7 +167,6 @@ func (svc *service) ProcessSicrediFiles(lancamentosFile io.Reader, contasFile io
 	}
 	cm := closestmatch.New(descricoesContas, []int{3, 4})
 
-	// Carregar lançamentos
 	lancamentos, err := svc.carregarLancamentos(lancamentosCSVReader)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao carregar arquivo de lançamentos: %w", err)
@@ -148,7 +178,7 @@ func (svc *service) ProcessSicrediFiles(lancamentosFile io.Reader, contasFile io
 
 	finalRows := svc.montarOutput(lancamentos, contasMap, cm)
 
-	outputCSV, err := svc.gerarCSV(finalRows)
+	outputCSV, err := svc.gerarCSVSicredi(finalRows)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao gerar CSV final: %w", err)
 	}
@@ -156,13 +186,12 @@ func (svc *service) ProcessSicrediFiles(lancamentosFile io.Reader, contasFile io
 	return outputCSV, nil
 }
 
-// carregarContas lê o CSV de contas.
-func (svc *service) carregarContas(contasFile io.Reader) (map[string]string, error) {
+func (svc *service) carregarContasSicredi(contasFile io.Reader) (map[string]string, error) {
 	decoder := charmap.ISO8859_1.NewDecoder()
 	reader := csv.NewReader(transform.NewReader(contasFile, decoder))
 	reader.Comma = ';'
 	reader.LazyQuotes = true
-	reader.FieldsPerRecord = -1 // permite variação no número de campos
+	reader.FieldsPerRecord = -1
 
 	records, err := reader.ReadAll()
 	if err != nil {
@@ -190,13 +219,12 @@ func (svc *service) carregarContas(contasFile io.Reader) (map[string]string, err
 	return contasMap, nil
 }
 
-// carregarLancamentos lê o CSV de lançamentos.
 func (svc *service) carregarLancamentos(lancamentosFile io.Reader) ([]domain.Lancamento, error) {
 	decoder := charmap.ISO8859_1.NewDecoder()
 	reader := csv.NewReader(transform.NewReader(lancamentosFile, decoder))
 	reader.Comma = ';'
 	reader.LazyQuotes = true
-	reader.FieldsPerRecord = -1 // permite variação no número de campos
+	reader.FieldsPerRecord = -1
 
 	records, err := reader.ReadAll()
 	if err != nil {
@@ -235,7 +263,6 @@ func (svc *service) carregarLancamentos(lancamentosFile io.Reader) ([]domain.Lan
 	return lancamentos, nil
 }
 
-// montarOutput organiza os lançamentos em registros finais.
 func (svc *service) montarOutput(lancamentos []domain.Lancamento, contasMap map[string]string, cm *closestmatch.ClosestMatch) []domain.OutputRow {
 	if len(lancamentos) == 0 {
 		return nil
@@ -259,7 +286,6 @@ func (svc *service) montarOutput(lancamentos []domain.Lancamento, contasMap map[
 	return finalRows
 }
 
-// processarGrupo gera registros de débito/crédito para um grupo de lançamentos.
 func (svc *service) processarGrupo(grupo []domain.Lancamento, finalRows *[]domain.OutputRow, contasMap map[string]string, cm *closestmatch.ClosestMatch) {
 	if len(grupo) == 0 {
 		return
@@ -305,8 +331,7 @@ func (svc *service) processarGrupo(grupo []domain.Lancamento, finalRows *[]domai
 	}
 }
 
-// gerarCSV exporta registros finais em CSV.
-func (svc *service) gerarCSV(rows []domain.OutputRow) ([]byte, error) {
+func (svc *service) gerarCSVSicredi(rows []domain.OutputRow) ([]byte, error) {
 	var buffer bytes.Buffer
 	encoder := charmap.Windows1252.NewEncoder()
 	writer := csv.NewWriter(transform.NewWriter(&buffer, encoder))
@@ -328,27 +353,269 @@ func (svc *service) gerarCSV(rows []domain.OutputRow) ([]byte, error) {
 	return buffer.Bytes(), writer.Error()
 }
 
-// Normalização de texto
-var nonAlphanumericRegex = regexp.MustCompile(`[^A-Z0-9 ]+`)
-var whitespaceRegex = regexp.MustCompile(`\s+`)
+// #############################################################################
+// #                            CONVERSOR RECEITAS ACISA                         #
+// #############################################################################
 
-func (svc *service) normalizeText(str string) string {
-	t := transform.Chain(norm.NFD, transform.RemoveFunc(func(r rune) bool {
-		return unicode.Is(unicode.Mn, r)
-	}))
-	result, _, _ := transform.String(t, str)
-	result = strings.ToUpper(result)
-	result = nonAlphanumericRegex.ReplaceAllString(result, " ")
-	result = whitespaceRegex.ReplaceAllString(result, " ")
-	return strings.TrimSpace(result)
+// ProcessReceitasAcisaFiles é o novo serviço para a funcionalidade de receitas.
+func (svc *service) ProcessReceitasAcisaFiles(excelFile io.Reader, contasFile io.Reader, excelFilename string, classPrefixes []string) ([]byte, error) {
+	// 1. Carregar e parsear o arquivo de Contas
+	contasEntries, allKeys, err := svc.loadContasReceitasAcisa(contasFile)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao carregar arquivo de contas: %w", err)
+	}
+
+	// 2. Carregar e preparar o arquivo Excel
+	excelData, err := svc.loadAndPrepareExcelReceitas(excelFile)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao carregar e preparar arquivo excel: %w", err)
+	}
+
+	cm := closestmatch.New(allKeys, []int{4, 5, 6})
+
+	// 3. Processar cada linha do Excel para criar as linhas de saída
+	var finalRows []domain.ReceitasAcisaOutputRow
+	for _, row := range excelData {
+		empresa := row["Empresa"]
+		refMes := row["RefMes"]
+		mensalidadeRaw := row["Mensalidade"]
+		pisRaw := row["Pis"]
+
+		code, matchedKey, _, _ := svc.matchContaReceitas(empresa, contasEntries, allKeys, cm, classPrefixes, 0.86)
+
+		var descricao string
+		if matchedEntries, ok := contasEntries[matchedKey]; ok {
+			var chosenDesc string
+			for _, e := range matchedEntries {
+				if e.Code == code {
+					chosenDesc = e.Desc
+					break
+				}
+			}
+			if chosenDesc == "" {
+				chosenDesc = matchedEntries[0].Desc
+			}
+			descricao = chosenDesc
+		} else {
+			descricao = empresa
+		}
+
+		mensalVal, _ := svc.parseBRLNumber(mensalidadeRaw)
+		pisVal, _ := svc.parseBRLNumber(pisRaw)
+
+		finalRows = append(finalRows, domain.ReceitasAcisaOutputRow{
+			Data:        refMes,
+			Descricao:   descricao,
+			Conta:       code,
+			Mensalidade: svc.formatTwoDecimalsComma(mensalVal),
+			Pis:         svc.formatTwoDecimalsComma(pisVal),
+			Historico:   fmt.Sprintf("%s da competencia %s", descricao, refMes),
+		})
+	}
+
+	// 4. Gerar o CSV final
+	return svc.gerarCSVReceitasAcisa(finalRows)
 }
 
-func (svc *service) parseBRLNumber(val string) (float64, error) {
-	s := strings.TrimSpace(val)
-	if s == "" {
-		return 0, nil
+func (svc *service) loadContasReceitasAcisa(contasFile io.Reader) (map[string][]domain.ContaReceitasAcisa, []string, error) {
+	decoder := charmap.ISO8859_1.NewDecoder()
+	reader := csv.NewReader(transform.NewReader(contasFile, decoder))
+	reader.Comma = ';'
+	reader.LazyQuotes = true
+	reader.FieldsPerRecord = -1
+
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, nil, err
 	}
-	s = strings.ReplaceAll(s, ".", "")
-	s = strings.ReplaceAll(s, ",", ".")
-	return strconv.ParseFloat(s, 64)
+
+	contasEntries := make(map[string][]domain.ContaReceitasAcisa)
+	var allKeys []string
+	keysMap := make(map[string]bool)
+
+	for _, record := range records {
+		if len(record) < 3 {
+			continue
+		}
+		code := strings.TrimSpace(record[0])
+		classif := strings.TrimSpace(record[1])
+		desc := strings.TrimSpace(record[2])
+		key := svc.normalizeText(desc)
+
+		if key == "" {
+			continue
+		}
+
+		entry := domain.ContaReceitasAcisa{Code: code, Classif: classif, Desc: desc}
+		contasEntries[key] = append(contasEntries[key], entry)
+
+		if !keysMap[key] {
+			keysMap[key] = true
+			allKeys = append(allKeys, key)
+		}
+	}
+	return contasEntries, allKeys, nil
+}
+
+func (svc *service) findHeaderRowReceitas(rows [][]string) int {
+	maxRowsSearch := 40
+	if len(rows) < maxRowsSearch {
+		maxRowsSearch = len(rows)
+	}
+	for i := 0; i < maxRowsSearch; i++ {
+		for _, cell := range rows[i] {
+			if strings.Contains(svc.normalizeText(cell), "EMPRESA") {
+				return i
+			}
+		}
+	}
+	return 0
+}
+
+func (svc *service) pickBestColumnReceitas(header []string, keywords []string) int {
+	normCols := make([]string, len(header))
+	for i, h := range header {
+		normCols[i] = svc.normalizeText(h)
+	}
+	for _, kw := range keywords {
+		nkw := svc.normalizeText(kw)
+		for idx, nc := range normCols {
+			if strings.Contains(nc, nkw) {
+				return idx
+			}
+		}
+	}
+	return -1
+}
+
+func (svc *service) loadAndPrepareExcelReceitas(excelFile io.Reader) ([]map[string]string, error) {
+	f, err := excelize.OpenReader(excelFile)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	sheetName := f.GetSheetList()[0]
+	rows, err := f.GetRows(sheetName)
+	if err != nil {
+		return nil, err
+	}
+
+	headerRowIndex := svc.findHeaderRowReceitas(rows)
+	header := rows[headerRowIndex]
+
+	empresaKw := []string{"EMPRESA", "NOME", "RAZAO", "FAVORECIDO"}
+	refmesKw := []string{"REF", "REF. MÊS", "REF MES", "REFERENCIA"}
+	mensalKw := []string{"MENSAL", "MENSALID", "MENSALIDADE", "VALOR"}
+	pisKw := []string{"PIS", "P.IS"}
+
+	idxEmpresa := svc.pickBestColumnReceitas(header, empresaKw)
+	idxRefmes := svc.pickBestColumnReceitas(header, refmesKw)
+	idxMensal := svc.pickBestColumnReceitas(header, mensalKw)
+	idxPis := svc.pickBestColumnReceitas(header, pisKw)
+
+	if idxEmpresa == -1 {
+		return nil, fmt.Errorf("coluna 'Empresa' não encontrada no Excel")
+	}
+
+	var data []map[string]string
+	for i := headerRowIndex + 1; i < len(rows); i++ {
+		row := rows[i]
+
+		getValue := func(idx int) string {
+			if idx != -1 && idx < len(row) {
+				return row[idx]
+			}
+			return ""
+		}
+
+		empresa := getValue(idxEmpresa)
+		if strings.TrimSpace(empresa) == "" || strings.Contains(strings.ToUpper(empresa), "TOTAL") {
+			continue
+		}
+
+		dataRow := map[string]string{
+			"Empresa":     empresa,
+			"RefMes":      getValue(idxRefmes),
+			"Mensalidade": getValue(idxMensal),
+			"Pis":         getValue(idxPis),
+		}
+		data = append(data, dataRow)
+	}
+
+	return data, nil
+}
+
+func (svc *service) matchContaReceitas(descricao string, contasEntries map[string][]domain.ContaReceitasAcisa, allKeys []string, cm *closestmatch.ClosestMatch, classPrefixes []string, cutoff float64) (code, matchedKey, matchedClass, mtype string) {
+	key := svc.normalizeText(descricao)
+	if key == "" {
+		return "99999999", "", "", "nao_aplicavel"
+	}
+
+	if len(classPrefixes) > 0 {
+		var candidateKeysFiltered []string
+		for k, entries := range contasEntries {
+			for _, e := range entries {
+				for _, p := range classPrefixes {
+					if strings.HasPrefix(e.Classif, p) {
+						candidateKeysFiltered = append(candidateKeysFiltered, k)
+						break
+					}
+				}
+			}
+		}
+
+		if len(candidateKeysFiltered) > 0 {
+			for _, kf := range candidateKeysFiltered {
+				if kf == key {
+					entries := contasEntries[key]
+					sort.Slice(entries, func(i, j int) bool { return len(entries[i].Classif) > len(entries[j].Classif) })
+					return entries[0].Code, key, entries[0].Classif, "exata_filtered"
+				}
+			}
+			cmFiltered := closestmatch.New(candidateKeysFiltered, []int{4, 5, 6})
+			match := cmFiltered.Closest(key)
+			if match != "" {
+				entries := contasEntries[match]
+				sort.Slice(entries, func(i, j int) bool { return len(entries[i].Classif) > len(entries[j].Classif) })
+				return entries[0].Code, match, entries[0].Classif, "fuzzy_filtered"
+			}
+		}
+	}
+
+	if entries, ok := contasEntries[key]; ok {
+		sort.Slice(entries, func(i, j int) bool { return len(entries[i].Classif) > len(entries[j].Classif) })
+		return entries[0].Code, key, entries[0].Classif, "exata_all"
+	}
+
+	match := cm.Closest(key)
+	if match != "" {
+		entries := contasEntries[match]
+		sort.Slice(entries, func(i, j int) bool { return len(entries[i].Classif) > len(entries[j].Classif) })
+		return entries[0].Code, match, entries[0].Classif, "fuzzy_all"
+	}
+
+	return "99999999", "", "", "nao_encontrada"
+}
+
+func (svc *service) gerarCSVReceitasAcisa(rows []domain.ReceitasAcisaOutputRow) ([]byte, error) {
+	var buffer bytes.Buffer
+	encoder := charmap.Windows1252.NewEncoder()
+	writer := csv.NewWriter(transform.NewWriter(&buffer, encoder))
+	writer.Comma = ';'
+
+	header := []string{"Data", "Descrição", "Conta", "Mensalidade", "Pis", "Histórico"}
+	if err := writer.Write(header); err != nil {
+		return nil, err
+	}
+
+	for _, row := range rows {
+		record := []string{row.Data, row.Descricao, row.Conta, row.Mensalidade, row.Pis, row.Historico}
+		if err := writer.Write(record); err != nil {
+			return nil, err
+		}
+	}
+
+	writer.Flush()
+	return buffer.Bytes(), writer.Error()
 }

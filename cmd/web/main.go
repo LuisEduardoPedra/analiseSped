@@ -47,9 +47,9 @@ func main() {
 
 	router := gin.Default()
 	router.Use(func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "https://analise-sped-frontend.vercel.app")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization")
+		c.Writer.Header().Set("Access-control-allow-Origin", "https://analise-sped-frontend.vercel.app")
+		c.Writer.Header().Set("Access-control-allow-Methods", "GET, POST, OPTIONS")
+		c.Writer.Header().Set("Access-control-allow-Headers", "Origin, Content-Type, Authorization")
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)
 			return
@@ -68,8 +68,9 @@ func main() {
 			protected.POST("/analyze/icms", middleware.PermissionMiddleware("analise-icms"), analysisHandler.HandleAnalysisIcms)
 			protected.POST("/analyze/ipi-st", middleware.PermissionMiddleware("analise-ipi-st"), analysisHandler.HandleAnalysisIpiSt)
 
-			// Rota de Conversão
+			// Rotas de Conversão
 			protected.POST("/convert/francesinha", middleware.PermissionMiddleware("converter-francesinha"), converterHandler.HandleSicrediConversion)
+			protected.POST("/convert/receitas-acisa", middleware.PermissionMiddleware("converter-receitas-acisa"), converterHandler.HandleReceitasAcisaConversion)
 		}
 	}
 
