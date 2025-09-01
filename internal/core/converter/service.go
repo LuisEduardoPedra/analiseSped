@@ -6,7 +6,6 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -16,9 +15,9 @@ import (
 	"unicode"
 
 	"github.com/LuisEduardoPedra/analiseSped/internal/domain"
-	"github.com/schollz/closestmatch"
-	"github.com/shakinm/xlsReader/xls" // <-- BIBLIOTECA SUBSTITUÍDA
-	"github.com/xuri/excelize/v2"
+	"github.com/schollz/closestmatch" // Biblioteca para .xls
+	"github.com/shakinm/xlsReader/xls"
+	"github.com/xuri/excelize/v2" // Biblioteca para .xlsx
 	"golang.org/x/text/encoding/charmap"
 	"golang.org/x/text/transform"
 	"golang.org/x/text/unicode/norm"
@@ -51,7 +50,7 @@ func (svc *service) convertXLSXtoCSV(file io.Reader) (io.Reader, error) {
 	for _, name := range f.GetSheetList() {
 		rows, err := f.GetRows(name)
 		if err != nil {
-			continue
+			continue // Pula para a próxima planilha se houver erro
 		}
 		for _, row := range rows {
 			if err := writer.Write(row); err != nil {
@@ -61,66 +60,35 @@ func (svc *service) convertXLSXtoCSV(file io.Reader) (io.Reader, error) {
 	}
 
 	writer.Flush()
-	if err := writer.Error(); err != nil {
+	return &buffer, writer.Error()
+}
+
+// convertXLStoCSV converte um arquivo .xls para um CSV em memória usando a biblioteca estável.
+func (svc *service) convertXLStoCSV(file io.Reader) (io.Reader, error) {
+	// Lê tudo em memória
+	data, err := io.ReadAll(file)
+	if err != nil {
 		return nil, err
 	}
 
-	return &buffer, nil
-}
+	// Cria um ReadSeeker a partir do buffer
+	reader := bytes.NewReader(data)
 
-// convertXLStoCSV foi reescrita para usar a biblioteca 'shakinm/xlsReader'.
-func (svc *service) convertXLStoCSV(file io.Reader) (io.Reader, error) {
-	// A biblioteca 'xlsReader' precisa de um caminho de arquivo ou de um objeto *os.File.
-	// A maneira mais fácil de lidar com um io.Reader é salvá-lo em um arquivo temporário.
-	tempFile, err := os.CreateTemp("", "temp-*.xls")
+	workbook, err := xls.OpenReader(reader)
 	if err != nil {
-		return nil, fmt.Errorf("falha ao criar arquivo temporário: %w", err)
-	}
-	defer os.Remove(tempFile.Name()) // Garante que o arquivo seja deletado no final
-	defer tempFile.Close()
-
-	// Copia o conteúdo do io.Reader para o arquivo temporário
-	if _, err := io.Copy(tempFile, file); err != nil {
-		return nil, fmt.Errorf("falha ao escrever no arquivo temporário: %w", err)
-	}
-	// Fecha o arquivo para que xls.OpenFile possa lê-lo
-	tempFile.Close()
-
-	// Abre o arquivo .xls a partir do caminho temporário
-	workbook, err := xls.OpenFile(tempFile.Name())
-	if err != nil {
-		return nil, fmt.Errorf("falha ao abrir o arquivo .xls: %w", err)
+		return nil, err
 	}
 
 	var buffer bytes.Buffer
 	writer := csv.NewWriter(&buffer)
 	writer.Comma = ';'
 
-	// Itera sobre todas as abas do workbook
-	for sheetIndex := 0; sheetIndex < workbook.GetNumberSheets(); sheetIndex++ {
-		sheet, err := workbook.GetSheet(sheetIndex)
-		if err != nil || sheet == nil {
-			continue
-		}
-
-		// Itera pelas linhas da aba
-		for i := 0; i <= int(sheet.GetNumberRows()); i++ {
-			row, err := sheet.GetRow(i)
-			if err != nil || row == nil {
-				continue // Pula linhas vazias ou com erro
-			}
-
+	for _, sheet := range workbook.GetSheets() {
+		for _, row := range sheet.GetRows() {
 			var csvRow []string
-			// Itera sobre as colunas da linha
-			for _, col := range row.GetCols() {
-				if col != nil {
-					// GetString() é o método para obter o valor da célula como texto
-					csvRow = append(csvRow, col.GetString())
-				} else {
-					csvRow = append(csvRow, "") // Adiciona uma string vazia para células nulas
-				}
+			for _, cell := range row.GetCols() {
+				csvRow = append(csvRow, cell.GetString())
 			}
-
 			if err := writer.Write(csvRow); err != nil {
 				return nil, err
 			}
@@ -128,19 +96,15 @@ func (svc *service) convertXLStoCSV(file io.Reader) (io.Reader, error) {
 	}
 
 	writer.Flush()
-	if err := writer.Error(); err != nil {
-		return nil, err
-	}
-
-	return &buffer, nil
+	return &buffer, writer.Error()
 }
 
-// ProcessSicrediFiles executa a lógica principal de conversão.
+// ProcessSicrediFiles agora usa uma abordagem nativa em Go.
 func (svc *service) ProcessSicrediFiles(lancamentosFile io.Reader, contasFile io.Reader, lancamentosFilename string) ([]byte, error) {
-
 	var lancamentosCSVReader io.Reader
 	ext := strings.ToLower(filepath.Ext(lancamentosFilename))
 
+	// Detecta o tipo de arquivo e chama o conversor apropriado em memória
 	switch ext {
 	case ".xlsx":
 		csvData, err := svc.convertXLSXtoCSV(lancamentosFile)
@@ -160,6 +124,7 @@ func (svc *service) ProcessSicrediFiles(lancamentosFile io.Reader, contasFile io
 		return nil, fmt.Errorf("formato de arquivo de lançamentos não suportado: %s", ext)
 	}
 
+	// A lógica de negócio restante permanece a mesma
 	contasMap, err := svc.carregarContas(contasFile)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao carregar arquivo de contas: %w", err)
@@ -190,6 +155,8 @@ func (svc *service) ProcessSicrediFiles(lancamentosFile io.Reader, contasFile io
 	return outputCSV, nil
 }
 
+// Funções auxiliares (carregarContas, carregarLancamentos, etc.) permanecem as mesmas.
+// As incluí abaixo para manter o arquivo completo.
 func (svc *service) carregarContas(contasFile io.Reader) (map[string]string, error) {
 	decoder := charmap.ISO8859_1.NewDecoder()
 	reader := csv.NewReader(transform.NewReader(contasFile, decoder))
@@ -350,11 +317,7 @@ func (svc *service) gerarCSV(rows []domain.OutputRow) ([]byte, error) {
 	}
 
 	writer.Flush()
-	if err := writer.Error(); err != nil {
-		return nil, err
-	}
-
-	return buffer.Bytes(), nil
+	return buffer.Bytes(), writer.Error()
 }
 
 var nonAlphanumericRegex = regexp.MustCompile(`[^A-Z0-9 ]+`)

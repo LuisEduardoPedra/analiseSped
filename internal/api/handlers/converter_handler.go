@@ -25,9 +25,10 @@ func NewConverterHandler(service converter.Service) *ConverterHandler {
 
 // HandleSicrediConversion lida com a conversão de arquivos do Sicredi.
 func (h *ConverterHandler) HandleSicrediConversion(c *gin.Context) {
+	// 1. Obter os arquivos da requisição
 	lancamentosFileHeader, err := c.FormFile("lancamentosFile")
 	if err != nil {
-		responses.Error(c, http.StatusBadRequest, "Arquivo de Lançamentos (.csv) não encontrado ou inválido")
+		responses.Error(c, http.StatusBadRequest, "Arquivo de Lançamentos (.csv, .xls, .xlsx) não encontrado ou inválido")
 		return
 	}
 
@@ -37,6 +38,7 @@ func (h *ConverterHandler) HandleSicrediConversion(c *gin.Context) {
 		return
 	}
 
+	// 2. Abrir os arquivos
 	lancamentosFile, err := lancamentosFileHeader.Open()
 	if err != nil {
 		responses.Error(c, http.StatusInternalServerError, "Não foi possível abrir o arquivo de Lançamentos")
@@ -51,13 +53,14 @@ func (h *ConverterHandler) HandleSicrediConversion(c *gin.Context) {
 	}
 	defer contasFile.Close()
 
-	// Chamada ao serviço simplificada, sem o 'cutoff'
+	// 3. Chamar o serviço de conversão, passando os streams e o nome do arquivo
 	outputCSV, err := h.service.ProcessSicrediFiles(lancamentosFile, contasFile, lancamentosFileHeader.Filename)
 	if err != nil {
 		responses.Error(c, http.StatusInternalServerError, "Erro ao processar os arquivos", err.Error())
 		return
 	}
 
+	// 4. Retornar o arquivo CSV gerado
 	fileName := fmt.Sprintf("LancamentosFinal_%s.csv", time.Now().Format("20060102_150405"))
 	c.Header("Content-Disposition", "attachment; filename="+fileName)
 	c.Data(http.StatusOK, "text/csv; charset=utf-8", outputCSV)
