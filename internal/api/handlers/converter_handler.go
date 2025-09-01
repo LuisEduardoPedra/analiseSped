@@ -52,7 +52,7 @@ func (h *ConverterHandler) HandleSicrediConversion(c *gin.Context) {
 	defer contasFile.Close()
 
 	// Chamada ao serviço simplificada, sem o 'cutoff'
-	outputCSV, err := h.service.ProcessSicrediFiles(lancamentosFile, contasFile)
+	outputCSV, err := h.service.ProcessSicrediFiles(lancamentosFile, contasFile, lancamentosFileHeader.Filename)
 	if err != nil {
 		responses.Error(c, http.StatusInternalServerError, "Erro ao processar os arquivos", err.Error())
 		return
