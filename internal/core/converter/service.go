@@ -277,7 +277,7 @@ func (svc *service) processarGrupo(grupo []domain.Lancamento, finalRows *[]domai
 		Data:         dataLancamento,
 		ContaCredito: "99999999",
 		Valor:        strings.Replace(fmt.Sprintf("%.2f", totalDiario), ".", ",", 1),
-		Historico:    "Títulos recebidos na data",
+		Historico:    "TÍTULOS RECEBIDOS NA DATA",
 	})
 
 	for _, l := range grupo {
