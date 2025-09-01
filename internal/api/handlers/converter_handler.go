@@ -1,9 +1,10 @@
-// internal/api/handlers/converter_handler.go
 package handlers
 
 import (
 	"fmt"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/LuisEduardoPedra/analiseSped/internal/api/responses"
@@ -38,7 +39,14 @@ func (h *ConverterHandler) HandleSicrediConversion(c *gin.Context) {
 		return
 	}
 
-	// 2. Abrir os arquivos
+	// 2. Validar extensão do arquivo de lançamentos
+	ext := strings.ToLower(filepath.Ext(lancamentosFileHeader.Filename))
+	if ext != ".csv" && ext != ".xls" && ext != ".xlsx" {
+		responses.Error(c, http.StatusBadRequest, fmt.Sprintf("Extensão de arquivo de lançamentos não suportada: %s", ext))
+		return
+	}
+
+	// 3. Abrir os arquivos
 	lancamentosFile, err := lancamentosFileHeader.Open()
 	if err != nil {
 		responses.Error(c, http.StatusInternalServerError, "Não foi possível abrir o arquivo de Lançamentos")
@@ -53,14 +61,16 @@ func (h *ConverterHandler) HandleSicrediConversion(c *gin.Context) {
 	}
 	defer contasFile.Close()
 
-	// 3. Chamar o serviço de conversão, passando os streams e o nome do arquivo
+	// 4. Chamar o serviço de conversão
 	outputCSV, err := h.service.ProcessSicrediFiles(lancamentosFile, contasFile, lancamentosFileHeader.Filename)
 	if err != nil {
+		// Loga o erro detalhado no servidor
+		fmt.Printf("Erro ao processar arquivos: %v\n", err)
 		responses.Error(c, http.StatusInternalServerError, "Erro ao processar os arquivos", err.Error())
 		return
 	}
 
-	// 4. Retornar o arquivo CSV gerado
+	// 5. Retornar o arquivo CSV gerado
 	fileName := fmt.Sprintf("LancamentosFinal_%s.csv", time.Now().Format("20060102_150405"))
 	c.Header("Content-Disposition", "attachment; filename="+fileName)
 	c.Data(http.StatusOK, "text/csv; charset=utf-8", outputCSV)

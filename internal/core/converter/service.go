@@ -1,4 +1,3 @@
-// internal/core/converter/service.go
 package converter
 
 import (
@@ -15,9 +14,9 @@ import (
 	"unicode"
 
 	"github.com/LuisEduardoPedra/analiseSped/internal/domain"
-	"github.com/schollz/closestmatch" // Biblioteca para .xls
-	"github.com/shakinm/xlsReader/xls"
-	"github.com/xuri/excelize/v2" // Biblioteca para .xlsx
+	"github.com/schollz/closestmatch"
+	"github.com/shakinm/xlsReader/xls" // corrigido import
+	"github.com/xuri/excelize/v2"
 	"golang.org/x/text/encoding/charmap"
 	"golang.org/x/text/transform"
 	"golang.org/x/text/unicode/norm"
@@ -50,7 +49,7 @@ func (svc *service) convertXLSXtoCSV(file io.Reader) (io.Reader, error) {
 	for _, name := range f.GetSheetList() {
 		rows, err := f.GetRows(name)
 		if err != nil {
-			continue // Pula para a próxima planilha se houver erro
+			continue
 		}
 		for _, row := range rows {
 			if err := writer.Write(row); err != nil {
@@ -63,19 +62,21 @@ func (svc *service) convertXLSXtoCSV(file io.Reader) (io.Reader, error) {
 	return &buffer, writer.Error()
 }
 
-// convertXLStoCSV converte um arquivo .xls para um CSV em memória usando a biblioteca estável.
+// convertXLStoCSV converte um arquivo .xls para um CSV em memória.
 func (svc *service) convertXLStoCSV(file io.Reader) (io.Reader, error) {
-	// Lê tudo em memória
+	// Lê tudo em memória, pois xls.OpenReader exige io.ReadSeeker
 	data, err := io.ReadAll(file)
 	if err != nil {
 		return nil, err
 	}
-
-	// Cria um ReadSeeker a partir do buffer
 	reader := bytes.NewReader(data)
 
 	workbook, err := xls.OpenReader(reader)
 	if err != nil {
+		// fallback: pode ser na verdade um .xlsx disfarçado
+		if _, errX := excelize.OpenReader(bytes.NewReader(data)); errX == nil {
+			return svc.convertXLSXtoCSV(bytes.NewReader(data))
+		}
 		return nil, err
 	}
 
@@ -99,12 +100,11 @@ func (svc *service) convertXLStoCSV(file io.Reader) (io.Reader, error) {
 	return &buffer, writer.Error()
 }
 
-// ProcessSicrediFiles agora usa uma abordagem nativa em Go.
+// ProcessSicrediFiles processa arquivos Sicredi (.csv, .xls, .xlsx).
 func (svc *service) ProcessSicrediFiles(lancamentosFile io.Reader, contasFile io.Reader, lancamentosFilename string) ([]byte, error) {
 	var lancamentosCSVReader io.Reader
 	ext := strings.ToLower(filepath.Ext(lancamentosFilename))
 
-	// Detecta o tipo de arquivo e chama o conversor apropriado em memória
 	switch ext {
 	case ".xlsx":
 		csvData, err := svc.convertXLSXtoCSV(lancamentosFile)
@@ -124,7 +124,7 @@ func (svc *service) ProcessSicrediFiles(lancamentosFile io.Reader, contasFile io
 		return nil, fmt.Errorf("formato de arquivo de lançamentos não suportado: %s", ext)
 	}
 
-	// A lógica de negócio restante permanece a mesma
+	// Carregar contas
 	contasMap, err := svc.carregarContas(contasFile)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao carregar arquivo de contas: %w", err)
@@ -136,6 +136,7 @@ func (svc *service) ProcessSicrediFiles(lancamentosFile io.Reader, contasFile io
 	}
 	cm := closestmatch.New(descricoesContas, []int{3, 4})
 
+	// Carregar lançamentos
 	lancamentos, err := svc.carregarLancamentos(lancamentosCSVReader)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao carregar arquivo de lançamentos: %w", err)
@@ -155,13 +156,13 @@ func (svc *service) ProcessSicrediFiles(lancamentosFile io.Reader, contasFile io
 	return outputCSV, nil
 }
 
-// Funções auxiliares (carregarContas, carregarLancamentos, etc.) permanecem as mesmas.
-// As incluí abaixo para manter o arquivo completo.
+// carregarContas lê o CSV de contas.
 func (svc *service) carregarContas(contasFile io.Reader) (map[string]string, error) {
 	decoder := charmap.ISO8859_1.NewDecoder()
 	reader := csv.NewReader(transform.NewReader(contasFile, decoder))
 	reader.Comma = ';'
 	reader.LazyQuotes = true
+	reader.FieldsPerRecord = -1 // permite variação no número de campos
 
 	records, err := reader.ReadAll()
 	if err != nil {
@@ -169,8 +170,9 @@ func (svc *service) carregarContas(contasFile io.Reader) (map[string]string, err
 	}
 
 	contasMap := make(map[string]string)
-	for _, record := range records {
+	for i, record := range records {
 		if len(record) < 3 {
+			fmt.Printf("Linha %d de contas ignorada (campos insuficientes): %+v\n", i+1, record)
 			continue
 		}
 		codigo := strings.TrimSpace(record[0])
@@ -188,11 +190,13 @@ func (svc *service) carregarContas(contasFile io.Reader) (map[string]string, err
 	return contasMap, nil
 }
 
+// carregarLancamentos lê o CSV de lançamentos.
 func (svc *service) carregarLancamentos(lancamentosFile io.Reader) ([]domain.Lancamento, error) {
 	decoder := charmap.ISO8859_1.NewDecoder()
 	reader := csv.NewReader(transform.NewReader(lancamentosFile, decoder))
 	reader.Comma = ';'
 	reader.LazyQuotes = true
+	reader.FieldsPerRecord = -1 // permite variação no número de campos
 
 	records, err := reader.ReadAll()
 	if err != nil {
@@ -200,8 +204,9 @@ func (svc *service) carregarLancamentos(lancamentosFile io.Reader) ([]domain.Lan
 	}
 
 	var lancamentos []domain.Lancamento
-	for _, record := range records {
+	for i, record := range records {
 		if len(record) < 9 || !strings.HasPrefix(strings.ToUpper(record[0]), "SIMPLES") {
+			fmt.Printf("Linha %d de lançamentos ignorada: %+v\n", i+1, record)
 			continue
 		}
 
@@ -230,6 +235,7 @@ func (svc *service) carregarLancamentos(lancamentosFile io.Reader) ([]domain.Lan
 	return lancamentos, nil
 }
 
+// montarOutput organiza os lançamentos em registros finais.
 func (svc *service) montarOutput(lancamentos []domain.Lancamento, contasMap map[string]string, cm *closestmatch.ClosestMatch) []domain.OutputRow {
 	if len(lancamentos) == 0 {
 		return nil
@@ -253,6 +259,7 @@ func (svc *service) montarOutput(lancamentos []domain.Lancamento, contasMap map[
 	return finalRows
 }
 
+// processarGrupo gera registros de débito/crédito para um grupo de lançamentos.
 func (svc *service) processarGrupo(grupo []domain.Lancamento, finalRows *[]domain.OutputRow, contasMap map[string]string, cm *closestmatch.ClosestMatch) {
 	if len(grupo) == 0 {
 		return
@@ -298,6 +305,7 @@ func (svc *service) processarGrupo(grupo []domain.Lancamento, finalRows *[]domai
 	}
 }
 
+// gerarCSV exporta registros finais em CSV.
 func (svc *service) gerarCSV(rows []domain.OutputRow) ([]byte, error) {
 	var buffer bytes.Buffer
 	encoder := charmap.Windows1252.NewEncoder()
@@ -320,6 +328,7 @@ func (svc *service) gerarCSV(rows []domain.OutputRow) ([]byte, error) {
 	return buffer.Bytes(), writer.Error()
 }
 
+// Normalização de texto
 var nonAlphanumericRegex = regexp.MustCompile(`[^A-Z0-9 ]+`)
 var whitespaceRegex = regexp.MustCompile(`\s+`)
 
