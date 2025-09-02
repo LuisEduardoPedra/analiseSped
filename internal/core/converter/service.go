@@ -24,7 +24,7 @@ import (
 
 // Service define a interface para os serviços de conversão de arquivos.
 type Service interface {
-	ProcessSicrediFiles(lancamentosFile io.Reader, contasFile io.Reader, lancamentosFilename string) ([]byte, error)
+	ProcessSicrediFiles(lancamentosFile io.Reader, contasFile io.Reader, lancamentosFilename string, classPrefixes []string) ([]byte, error)
 	ProcessReceitasAcisaFiles(excelFile io.Reader, contasFile io.Reader, excelFilename string, classPrefixes []string) ([]byte, error)
 }
 
@@ -68,7 +68,6 @@ func (svc *service) formatTwoDecimalsComma(val float64) string {
 // #                         CONVERSOR FRANCESINHA (SICREDI)                     #
 // #############################################################################
 
-// convertXLSXtoCSV converte um arquivo .xlsx para um CSV em memória.
 func (svc *service) convertXLSXtoCSV(file io.Reader) (io.Reader, error) {
 	f, err := excelize.OpenReader(file)
 	if err != nil {
@@ -96,7 +95,6 @@ func (svc *service) convertXLSXtoCSV(file io.Reader) (io.Reader, error) {
 	return &buffer, writer.Error()
 }
 
-// convertXLStoCSV converte um arquivo .xls para um CSV em memória.
 func (svc *service) convertXLStoCSV(file io.Reader) (io.Reader, error) {
 	data, err := io.ReadAll(file)
 	if err != nil {
@@ -132,8 +130,7 @@ func (svc *service) convertXLStoCSV(file io.Reader) (io.Reader, error) {
 	return &buffer, writer.Error()
 }
 
-// ProcessSicrediFiles processa arquivos Sicredi (.csv, .xls, .xlsx).
-func (svc *service) ProcessSicrediFiles(lancamentosFile io.Reader, contasFile io.Reader, lancamentosFilename string) ([]byte, error) {
+func (svc *service) ProcessSicrediFiles(lancamentosFile io.Reader, contasFile io.Reader, lancamentosFilename string, classPrefixes []string) ([]byte, error) {
 	var lancamentosCSVReader io.Reader
 	ext := strings.ToLower(filepath.Ext(lancamentosFilename))
 
@@ -156,16 +153,12 @@ func (svc *service) ProcessSicrediFiles(lancamentosFile io.Reader, contasFile io
 		return nil, fmt.Errorf("formato de arquivo de lançamentos não suportado: %s", ext)
 	}
 
-	contasMap, err := svc.carregarContasSicredi(contasFile)
+	contasEntries, allKeys, err := svc.loadContasSicredi(contasFile)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao carregar arquivo de contas: %w", err)
 	}
 
-	descricoesContas := make([]string, 0, len(contasMap))
-	for descNorm := range contasMap {
-		descricoesContas = append(descricoesContas, descNorm)
-	}
-	cm := closestmatch.New(descricoesContas, []int{3, 4})
+	cm := closestmatch.New(allKeys, []int{3, 4})
 
 	lancamentos, err := svc.carregarLancamentos(lancamentosCSVReader)
 	if err != nil {
@@ -176,7 +169,7 @@ func (svc *service) ProcessSicrediFiles(lancamentosFile io.Reader, contasFile io
 		return lancamentos[i].DataLiquidacao.Before(lancamentos[j].DataLiquidacao)
 	})
 
-	finalRows := svc.montarOutput(lancamentos, contasMap, cm)
+	finalRows := svc.montarOutputSicredi(lancamentos, contasEntries, allKeys, cm, classPrefixes)
 
 	outputCSV, err := svc.gerarCSVSicredi(finalRows)
 	if err != nil {
@@ -186,7 +179,7 @@ func (svc *service) ProcessSicrediFiles(lancamentosFile io.Reader, contasFile io
 	return outputCSV, nil
 }
 
-func (svc *service) carregarContasSicredi(contasFile io.Reader) (map[string]string, error) {
+func (svc *service) loadContasSicredi(contasFile io.Reader) (map[string][]domain.ContaSicredi, []string, error) {
 	decoder := charmap.ISO8859_1.NewDecoder()
 	reader := csv.NewReader(transform.NewReader(contasFile, decoder))
 	reader.Comma = ';'
@@ -195,28 +188,35 @@ func (svc *service) carregarContasSicredi(contasFile io.Reader) (map[string]stri
 
 	records, err := reader.ReadAll()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	contasMap := make(map[string]string)
-	for i, record := range records {
+	contasEntries := make(map[string][]domain.ContaSicredi)
+	var allKeys []string
+	keysMap := make(map[string]bool)
+
+	for _, record := range records {
 		if len(record) < 3 {
-			fmt.Printf("Linha %d de contas ignorada (campos insuficientes): %+v\n", i+1, record)
 			continue
 		}
-		codigo := strings.TrimSpace(record[0])
-		descricao := strings.TrimSpace(record[2])
+		code := strings.TrimSpace(record[0])
+		classif := strings.TrimSpace(record[1])
+		desc := strings.TrimSpace(record[2])
+		key := svc.normalizeText(desc)
 
-		if _, err := strconv.Atoi(codigo); err != nil || descricao == "" {
+		if key == "" {
 			continue
 		}
 
-		descNorm := svc.normalizeText(descricao)
-		if _, exists := contasMap[descNorm]; !exists {
-			contasMap[descNorm] = codigo
+		entry := domain.ContaSicredi{Code: code, Classif: classif, Desc: desc}
+		contasEntries[key] = append(contasEntries[key], entry)
+
+		if !keysMap[key] {
+			keysMap[key] = true
+			allKeys = append(allKeys, key)
 		}
 	}
-	return contasMap, nil
+	return contasEntries, allKeys, nil
 }
 
 func (svc *service) carregarLancamentos(lancamentosFile io.Reader) ([]domain.Lancamento, error) {
@@ -263,7 +263,7 @@ func (svc *service) carregarLancamentos(lancamentosFile io.Reader) ([]domain.Lan
 	return lancamentos, nil
 }
 
-func (svc *service) montarOutput(lancamentos []domain.Lancamento, contasMap map[string]string, cm *closestmatch.ClosestMatch) []domain.OutputRow {
+func (svc *service) montarOutputSicredi(lancamentos []domain.Lancamento, contasEntries map[string][]domain.ContaSicredi, allKeys []string, cm *closestmatch.ClosestMatch, classPrefixes []string) []domain.OutputRow {
 	if len(lancamentos) == 0 {
 		return nil
 	}
@@ -276,17 +276,17 @@ func (svc *service) montarOutput(lancamentos []domain.Lancamento, contasMap map[
 		if l.DataLiquidacao.Equal(currentDate) {
 			group = append(group, l)
 		} else {
-			svc.processarGrupo(group, &finalRows, contasMap, cm)
+			svc.processarGrupoSicredi(group, &finalRows, contasEntries, allKeys, cm, classPrefixes)
 			group = []domain.Lancamento{l}
 			currentDate = l.DataLiquidacao
 		}
 	}
-	svc.processarGrupo(group, &finalRows, contasMap, cm)
+	svc.processarGrupoSicredi(group, &finalRows, contasEntries, allKeys, cm, classPrefixes)
 
 	return finalRows
 }
 
-func (svc *service) processarGrupo(grupo []domain.Lancamento, finalRows *[]domain.OutputRow, contasMap map[string]string, cm *closestmatch.ClosestMatch) {
+func (svc *service) processarGrupoSicredi(grupo []domain.Lancamento, finalRows *[]domain.OutputRow, contasEntries map[string][]domain.ContaSicredi, allKeys []string, cm *closestmatch.ClosestMatch, classPrefixes []string) {
 	if len(grupo) == 0 {
 		return
 	}
@@ -307,18 +307,7 @@ func (svc *service) processarGrupo(grupo []domain.Lancamento, finalRows *[]domai
 	})
 
 	for _, l := range grupo {
-		descNorm := svc.normalizeText(l.Descricao)
-		codigoConta := "99999999"
-		if code, ok := contasMap[descNorm]; ok {
-			codigoConta = code
-		} else {
-			match := cm.Closest(descNorm)
-			if match != "" {
-				if code, ok := contasMap[match]; ok {
-					codigoConta = code
-				}
-			}
-		}
+		codigoConta, _, _, _ := svc.matchContaSicredi(l.Descricao, contasEntries, allKeys, cm, classPrefixes)
 
 		*finalRows = append(*finalRows, domain.OutputRow{
 			Operacao:         "C",
@@ -329,6 +318,58 @@ func (svc *service) processarGrupo(grupo []domain.Lancamento, finalRows *[]domai
 			Historico:        l.Historico,
 		})
 	}
+}
+
+func (svc *service) matchContaSicredi(descricao string, contasEntries map[string][]domain.ContaSicredi, allKeys []string, cm *closestmatch.ClosestMatch, classPrefixes []string) (code, matchedKey, matchedClass, mtype string) {
+	key := svc.normalizeText(descricao)
+	if key == "" {
+		return "99999999", "", "", "nao_aplicavel"
+	}
+
+	if len(classPrefixes) > 0 {
+		var candidateKeysFiltered []string
+		for k, entries := range contasEntries {
+			for _, e := range entries {
+				for _, p := range classPrefixes {
+					if strings.HasPrefix(e.Classif, p) {
+						candidateKeysFiltered = append(candidateKeysFiltered, k)
+						break
+					}
+				}
+			}
+		}
+
+		if len(candidateKeysFiltered) > 0 {
+			for _, kf := range candidateKeysFiltered {
+				if kf == key {
+					entries := contasEntries[key]
+					sort.Slice(entries, func(i, j int) bool { return len(entries[i].Classif) > len(entries[j].Classif) })
+					return entries[0].Code, key, entries[0].Classif, "exata_filtered"
+				}
+			}
+			cmFiltered := closestmatch.New(candidateKeysFiltered, []int{3, 4})
+			match := cmFiltered.Closest(key)
+			if match != "" {
+				entries := contasEntries[match]
+				sort.Slice(entries, func(i, j int) bool { return len(entries[i].Classif) > len(entries[j].Classif) })
+				return entries[0].Code, match, entries[0].Classif, "fuzzy_filtered"
+			}
+		}
+	}
+
+	if entries, ok := contasEntries[key]; ok {
+		sort.Slice(entries, func(i, j int) bool { return len(entries[i].Classif) > len(entries[j].Classif) })
+		return entries[0].Code, key, entries[0].Classif, "exata_all"
+	}
+
+	match := cm.Closest(key)
+	if match != "" {
+		entries := contasEntries[match]
+		sort.Slice(entries, func(i, j int) bool { return len(entries[i].Classif) > len(entries[j].Classif) })
+		return entries[0].Code, match, entries[0].Classif, "fuzzy_all"
+	}
+
+	return "99999999", "", "", "nao_encontrada"
 }
 
 func (svc *service) gerarCSVSicredi(rows []domain.OutputRow) ([]byte, error) {
@@ -357,15 +398,12 @@ func (svc *service) gerarCSVSicredi(rows []domain.OutputRow) ([]byte, error) {
 // #                            CONVERSOR RECEITAS ACISA                         #
 // #############################################################################
 
-// ProcessReceitasAcisaFiles é o novo serviço para a funcionalidade de receitas.
 func (svc *service) ProcessReceitasAcisaFiles(excelFile io.Reader, contasFile io.Reader, excelFilename string, classPrefixes []string) ([]byte, error) {
-	// 1. Carregar e parsear o arquivo de Contas
 	contasEntries, allKeys, err := svc.loadContasReceitasAcisa(contasFile)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao carregar arquivo de contas: %w", err)
 	}
 
-	// 2. Carregar e preparar o arquivo Excel
 	excelData, err := svc.loadAndPrepareExcelReceitas(excelFile)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao carregar e preparar arquivo excel: %w", err)
@@ -373,7 +411,6 @@ func (svc *service) ProcessReceitasAcisaFiles(excelFile io.Reader, contasFile io
 
 	cm := closestmatch.New(allKeys, []int{4, 5, 6})
 
-	// 3. Processar cada linha do Excel para criar as linhas de saída
 	var finalRows []domain.ReceitasAcisaOutputRow
 	for _, row := range excelData {
 		empresa := row["Empresa"]
@@ -413,7 +450,6 @@ func (svc *service) ProcessReceitasAcisaFiles(excelFile io.Reader, contasFile io
 		})
 	}
 
-	// 4. Gerar o CSV final
 	return svc.gerarCSVReceitasAcisa(finalRows)
 }
 
@@ -530,7 +566,8 @@ func (svc *service) loadAndPrepareExcelReceitas(excelFile io.Reader) ([]map[stri
 		}
 
 		empresa := getValue(idxEmpresa)
-		if strings.TrimSpace(empresa) == "" || strings.Contains(strings.ToUpper(empresa), "TOTAL") || strings.Contains(strings.ToUpper(empresa), "TOTAIS") {
+		empresaUpper := strings.ToUpper(empresa)
+		if strings.TrimSpace(empresa) == "" || strings.Contains(empresaUpper, "TOTAL") || strings.Contains(empresaUpper, "TOTAIS") {
 			continue
 		}
 

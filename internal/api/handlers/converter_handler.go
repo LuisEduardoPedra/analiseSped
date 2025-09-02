@@ -24,7 +24,7 @@ func NewConverterHandler(service converter.Service) *ConverterHandler {
 	}
 }
 
-// HandleSicrediConversion lida com a conversão de arquivos do Sicredi.
+// HandleSicrediConversion lida com a conversão de arquivos do Sicredi (francesinha).
 func (h *ConverterHandler) HandleSicrediConversion(c *gin.Context) {
 	// 1. Obter os arquivos da requisição
 	lancamentosFileHeader, err := c.FormFile("lancamentosFile")
@@ -46,6 +46,19 @@ func (h *ConverterHandler) HandleSicrediConversion(c *gin.Context) {
 		return
 	}
 
+	// Obter prefixos de classe (parâmetro opcional)
+	classPrefixesStr := c.PostForm("classPrefixes")
+	var classPrefixes []string
+	if classPrefixesStr != "" {
+		parts := strings.Split(classPrefixesStr, ",")
+		for _, part := range parts {
+			trimmed := strings.TrimSpace(part)
+			if trimmed != "" {
+				classPrefixes = append(classPrefixes, trimmed)
+			}
+		}
+	}
+
 	// 3. Abrir os arquivos
 	lancamentosFile, err := lancamentosFileHeader.Open()
 	if err != nil {
@@ -62,7 +75,7 @@ func (h *ConverterHandler) HandleSicrediConversion(c *gin.Context) {
 	defer contasFile.Close()
 
 	// 4. Chamar o serviço de conversão
-	outputCSV, err := h.service.ProcessSicrediFiles(lancamentosFile, contasFile, lancamentosFileHeader.Filename)
+	outputCSV, err := h.service.ProcessSicrediFiles(lancamentosFile, contasFile, lancamentosFileHeader.Filename, classPrefixes)
 	if err != nil {
 		fmt.Printf("Erro ao processar arquivos Sicredi: %v\n", err)
 		responses.Error(c, http.StatusInternalServerError, "Erro ao processar os arquivos", err.Error())

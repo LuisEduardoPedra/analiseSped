@@ -91,7 +91,7 @@ type NFeXML struct {
 		ID    string   `xml:"Id,attr"`
 		Ide   IdeXML   `xml:"ide"`
 		Det   []DetXML `xml:"det"`
-		Total TotalXML `xml:"total"` // Added for IPI and ST parsing
+		Total TotalXML `xml:"total"`
 	} `xml:"infNFe"`
 }
 
@@ -138,6 +138,13 @@ type DetXML struct {
 }
 
 // --- Modelos de Conversor Francesinha ---
+
+// ContaSicredi representa uma entrada do arquivo Contas.csv para o conversor Sicredi.
+type ContaSicredi struct {
+	Code    string
+	Classif string
+	Desc    string
+}
 
 // Lancamento representa uma linha de lançamento do arquivo de entrada.
 type Lancamento struct {
