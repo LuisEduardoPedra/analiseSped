@@ -530,7 +530,7 @@ func (svc *service) loadAndPrepareExcelReceitas(excelFile io.Reader) ([]map[stri
 		}
 
 		empresa := getValue(idxEmpresa)
-		if strings.TrimSpace(empresa) == "" || strings.Contains(strings.ToUpper(empresa), "TOTAL") {
+		if strings.TrimSpace(empresa) == "" || strings.Contains(strings.ToUpper(empresa), "TOTAL") || strings.Contains(strings.ToUpper(empresa), "TOTAIS") {
 			continue
 		}
 
