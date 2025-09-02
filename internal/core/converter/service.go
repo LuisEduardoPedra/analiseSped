@@ -158,8 +158,6 @@ func (svc *service) ProcessSicrediFiles(lancamentosFile io.Reader, contasFile io
 		return nil, fmt.Errorf("erro ao carregar arquivo de contas: %w", err)
 	}
 
-	cm := closestmatch.New(allKeys, []int{3, 4})
-
 	lancamentos, err := svc.carregarLancamentos(lancamentosCSVReader)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao carregar arquivo de lançamentos: %w", err)
@@ -169,7 +167,7 @@ func (svc *service) ProcessSicrediFiles(lancamentosFile io.Reader, contasFile io
 		return lancamentos[i].DataLiquidacao.Before(lancamentos[j].DataLiquidacao)
 	})
 
-	finalRows := svc.montarOutputSicredi(lancamentos, contasEntries, allKeys, cm, classPrefixes)
+	finalRows := svc.montarOutputSicredi(lancamentos, contasEntries, allKeys, classPrefixes)
 
 	outputCSV, err := svc.gerarCSVSicredi(finalRows)
 	if err != nil {
@@ -263,7 +261,7 @@ func (svc *service) carregarLancamentos(lancamentosFile io.Reader) ([]domain.Lan
 	return lancamentos, nil
 }
 
-func (svc *service) montarOutputSicredi(lancamentos []domain.Lancamento, contasEntries map[string][]domain.ContaSicredi, allKeys []string, cm *closestmatch.ClosestMatch, classPrefixes []string) []domain.OutputRow {
+func (svc *service) montarOutputSicredi(lancamentos []domain.Lancamento, contasEntries map[string][]domain.ContaSicredi, allKeys []string, classPrefixes []string) []domain.OutputRow {
 	if len(lancamentos) == 0 {
 		return nil
 	}
@@ -276,17 +274,17 @@ func (svc *service) montarOutputSicredi(lancamentos []domain.Lancamento, contasE
 		if l.DataLiquidacao.Equal(currentDate) {
 			group = append(group, l)
 		} else {
-			svc.processarGrupoSicredi(group, &finalRows, contasEntries, allKeys, cm, classPrefixes)
+			svc.processarGrupoSicredi(group, &finalRows, contasEntries, allKeys, classPrefixes)
 			group = []domain.Lancamento{l}
 			currentDate = l.DataLiquidacao
 		}
 	}
-	svc.processarGrupoSicredi(group, &finalRows, contasEntries, allKeys, cm, classPrefixes)
+	svc.processarGrupoSicredi(group, &finalRows, contasEntries, allKeys, classPrefixes)
 
 	return finalRows
 }
 
-func (svc *service) processarGrupoSicredi(grupo []domain.Lancamento, finalRows *[]domain.OutputRow, contasEntries map[string][]domain.ContaSicredi, allKeys []string, cm *closestmatch.ClosestMatch, classPrefixes []string) {
+func (svc *service) processarGrupoSicredi(grupo []domain.Lancamento, finalRows *[]domain.OutputRow, contasEntries map[string][]domain.ContaSicredi, allKeys []string, classPrefixes []string) {
 	if len(grupo) == 0 {
 		return
 	}
@@ -307,7 +305,7 @@ func (svc *service) processarGrupoSicredi(grupo []domain.Lancamento, finalRows *
 	})
 
 	for _, l := range grupo {
-		codigoConta, _, _, _ := svc.matchContaSicredi(l.Descricao, contasEntries, allKeys, cm, classPrefixes)
+		codigoConta, _, _, _ := svc.matchContaSicredi(l.Descricao, contasEntries, allKeys, classPrefixes)
 
 		*finalRows = append(*finalRows, domain.OutputRow{
 			Operacao:         "C",
@@ -320,88 +318,64 @@ func (svc *service) processarGrupoSicredi(grupo []domain.Lancamento, finalRows *
 	}
 }
 
-// Helper para filtrar contas do Sicredi por prefixo de classificação
-func filterEntriesByPrefixSicredi(entries []domain.ContaSicredi, prefixes []string) []domain.ContaSicredi {
-	if len(prefixes) == 0 {
-		return entries
-	}
-	var filtered []domain.ContaSicredi
-	for _, entry := range entries {
-		for _, p := range prefixes {
-			if strings.HasPrefix(entry.Classif, p) {
-				filtered = append(filtered, entry)
-				break
-			}
-		}
-	}
-	return filtered
-}
-
-// Lógica de match para Sicredi com a correção do filtro
-func (svc *service) matchContaSicredi(descricao string, contasEntries map[string][]domain.ContaSicredi, allKeys []string, cm *closestmatch.ClosestMatch, classPrefixes []string) (code, matchedKey, matchedClass, mtype string) {
+// **NOVA LÓGICA DE MATCH PARA SICREDI**
+func (svc *service) matchContaSicredi(descricao string, contasEntries map[string][]domain.ContaSicredi, allKeys []string, classPrefixes []string) (code, matchedKey, matchedClass, mtype string) {
 	key := svc.normalizeText(descricao)
 	if key == "" {
 		return "99999999", "", "", "nao_aplicavel"
 	}
 
-	// Se houver prefixos, priorizar a busca filtrada
+	// Define o escopo da busca: filtrado ou global
+	searchEntries := contasEntries
+	searchKeys := allKeys
+	mtypeSuffix := "_all"
+
 	if len(classPrefixes) > 0 {
-		var candidateKeysFiltered []string
-		// Mapeia descrições normalizadas que possuem pelo menos uma conta com o prefixo
+		searchEntries = make(map[string][]domain.ContaSicredi)
+		var filteredKeys []string
+		keysMap := make(map[string]bool)
+
 		for k, entries := range contasEntries {
-			for _, e := range entries {
+			var matchingEntries []domain.ContaSicredi
+			for _, entry := range entries {
 				for _, p := range classPrefixes {
-					if strings.HasPrefix(e.Classif, p) {
-						candidateKeysFiltered = append(candidateKeysFiltered, k)
-						break
+					if strings.HasPrefix(entry.Classif, p) {
+						matchingEntries = append(matchingEntries, entry)
+						break // Evita adicionar a mesma entrada múltiplas vezes
 					}
 				}
 			}
-		}
-
-		if len(candidateKeysFiltered) > 0 {
-			// Busca exata dentro das candidatas
-			for _, kf := range candidateKeysFiltered {
-				if kf == key {
-					entries := contasEntries[key]
-					// CORREÇÃO: Filtra as contas para garantir que a escolhida corresponde ao prefixo
-					filteredEntries := filterEntriesByPrefixSicredi(entries, classPrefixes)
-					if len(filteredEntries) > 0 {
-						sort.Slice(filteredEntries, func(i, j int) bool { return len(filteredEntries[i].Classif) > len(filteredEntries[j].Classif) })
-						return filteredEntries[0].Code, key, filteredEntries[0].Classif, "exata_filtered"
-					}
-				}
-			}
-
-			// Busca por proximidade dentro das candidatas
-			cmFiltered := closestmatch.New(candidateKeysFiltered, []int{3, 4})
-			match := cmFiltered.Closest(key)
-			if match != "" {
-				entries := contasEntries[match]
-				// CORREÇÃO: Filtra as contas para garantir que a escolhida corresponde ao prefixo
-				filteredEntries := filterEntriesByPrefixSicredi(entries, classPrefixes)
-				if len(filteredEntries) > 0 {
-					sort.Slice(filteredEntries, func(i, j int) bool { return len(filteredEntries[i].Classif) > len(filteredEntries[j].Classif) })
-					return filteredEntries[0].Code, match, filteredEntries[0].Classif, "fuzzy_filtered"
+			if len(matchingEntries) > 0 {
+				searchEntries[k] = matchingEntries
+				if !keysMap[k] {
+					keysMap[k] = true
+					filteredKeys = append(filteredKeys, k)
 				}
 			}
 		}
+		searchKeys = filteredKeys
+		mtypeSuffix = "_filtered"
 	}
 
-	// Fallback para busca geral se o filtro não produzir resultados ou não for fornecido
-
-	// Busca exata geral
-	if entries, ok := contasEntries[key]; ok {
+	// 1. Busca por correspondência exata no escopo definido
+	if entries, ok := searchEntries[key]; ok && len(entries) > 0 {
 		sort.Slice(entries, func(i, j int) bool { return len(entries[i].Classif) > len(entries[j].Classif) })
-		return entries[0].Code, key, entries[0].Classif, "exata_all"
+		chosen := entries[0]
+		return chosen.Code, key, chosen.Classif, "exata" + mtypeSuffix
 	}
 
-	// Busca por proximidade geral
-	match := cm.Closest(key)
-	if match != "" {
-		entries := contasEntries[match]
-		sort.Slice(entries, func(i, j int) bool { return len(entries[i].Classif) > len(entries[j].Classif) })
-		return entries[0].Code, match, entries[0].Classif, "fuzzy_all"
+	// 2. Busca por proximidade no escopo definido
+	if len(searchKeys) > 0 {
+		cm := closestmatch.New(searchKeys, []int{3, 4})
+		match := cm.Closest(key)
+		if match != "" {
+			entries := searchEntries[match]
+			if len(entries) > 0 {
+				sort.Slice(entries, func(i, j int) bool { return len(entries[i].Classif) > len(entries[j].Classif) })
+				chosen := entries[0]
+				return chosen.Code, match, chosen.Classif, "fuzzy" + mtypeSuffix
+			}
+		}
 	}
 
 	return "99999999", "", "", "nao_encontrada"
@@ -444,8 +418,6 @@ func (svc *service) ProcessReceitasAcisaFiles(excelFile io.Reader, contasFile io
 		return nil, fmt.Errorf("erro ao carregar e preparar arquivo excel: %w", err)
 	}
 
-	cm := closestmatch.New(allKeys, []int{4, 5, 6})
-
 	var finalRows []domain.ReceitasAcisaOutputRow
 	for _, row := range excelData {
 		empresa := row["Empresa"]
@@ -453,27 +425,38 @@ func (svc *service) ProcessReceitasAcisaFiles(excelFile io.Reader, contasFile io
 		mensalidadeRaw := row["Mensalidade"]
 		pisRaw := row["Pis"]
 
-		code, matchedKey, _, _ := svc.matchContaReceitas(empresa, contasEntries, allKeys, cm, classPrefixes)
+		code, matchedKey, _, _ := svc.matchContaReceitas(empresa, contasEntries, allKeys, classPrefixes)
 
 		var descricao string
-		if matchedEntries, ok := contasEntries[matchedKey]; ok {
+		if entries, ok := contasEntries[matchedKey]; ok {
 			var chosenDesc string
-			// CORREÇÃO: A lógica para escolher a descrição também deve respeitar o filtro
-			filteredEntries := filterEntriesByPrefixReceitas(matchedEntries, classPrefixes)
+			// A escolha da descrição também deve respeitar o filtro
+			filteredEntries := entries
+			if len(classPrefixes) > 0 {
+				var tempFiltered []domain.ContaReceitasAcisa
+				for _, e := range entries {
+					for _, p := range classPrefixes {
+						if strings.HasPrefix(e.Classif, p) {
+							tempFiltered = append(tempFiltered, e)
+							break
+						}
+					}
+				}
+				filteredEntries = tempFiltered
+			}
+
 			if len(filteredEntries) > 0 {
-				// Procura a entrada exata dentro das filtradas
 				for _, e := range filteredEntries {
 					if e.Code == code {
 						chosenDesc = e.Desc
 						break
 					}
 				}
-				// Se não encontrar, pega a primeira das filtradas
 				if chosenDesc == "" {
 					chosenDesc = filteredEntries[0].Desc
 				}
-			} else { // Fallback se o filtro não retornar nada (não deveria acontecer se o match funcionou)
-				chosenDesc = matchedEntries[0].Desc
+			} else if len(entries) > 0 { // Fallback (não deveria ser necessário)
+				chosenDesc = entries[0].Desc
 			}
 			descricao = chosenDesc
 		} else {
@@ -626,78 +609,64 @@ func (svc *service) loadAndPrepareExcelReceitas(excelFile io.Reader) ([]map[stri
 	return data, nil
 }
 
-// Helper para filtrar contas de Receitas por prefixo de classificação
-func filterEntriesByPrefixReceitas(entries []domain.ContaReceitasAcisa, prefixes []string) []domain.ContaReceitasAcisa {
-	if len(prefixes) == 0 {
-		return entries
-	}
-	var filtered []domain.ContaReceitasAcisa
-	for _, entry := range entries {
-		for _, p := range prefixes {
-			if strings.HasPrefix(entry.Classif, p) {
-				filtered = append(filtered, entry)
-				break
-			}
-		}
-	}
-	return filtered
-}
-
-// Lógica de match para Receitas com a correção do filtro
-func (svc *service) matchContaReceitas(descricao string, contasEntries map[string][]domain.ContaReceitasAcisa, allKeys []string, cm *closestmatch.ClosestMatch, classPrefixes []string) (code, matchedKey, matchedClass, mtype string) {
+// **NOVA LÓGICA DE MATCH PARA RECEITAS ACISA**
+func (svc *service) matchContaReceitas(descricao string, contasEntries map[string][]domain.ContaReceitasAcisa, allKeys []string, classPrefixes []string) (code, matchedKey, matchedClass, mtype string) {
 	key := svc.normalizeText(descricao)
 	if key == "" {
 		return "99999999", "", "", "nao_aplicavel"
 	}
 
+	// Define o escopo da busca: filtrado ou global
+	searchEntries := contasEntries
+	searchKeys := allKeys
+	mtypeSuffix := "_all"
+
 	if len(classPrefixes) > 0 {
-		var candidateKeysFiltered []string
+		searchEntries = make(map[string][]domain.ContaReceitasAcisa)
+		var filteredKeys []string
+		keysMap := make(map[string]bool)
+
 		for k, entries := range contasEntries {
-			for _, e := range entries {
+			var matchingEntries []domain.ContaReceitasAcisa
+			for _, entry := range entries {
 				for _, p := range classPrefixes {
-					if strings.HasPrefix(e.Classif, p) {
-						candidateKeysFiltered = append(candidateKeysFiltered, k)
+					if strings.HasPrefix(entry.Classif, p) {
+						matchingEntries = append(matchingEntries, entry)
 						break
 					}
 				}
 			}
-		}
-
-		if len(candidateKeysFiltered) > 0 {
-			for _, kf := range candidateKeysFiltered {
-				if kf == key {
-					entries := contasEntries[key]
-					filteredEntries := filterEntriesByPrefixReceitas(entries, classPrefixes)
-					if len(filteredEntries) > 0 {
-						sort.Slice(filteredEntries, func(i, j int) bool { return len(filteredEntries[i].Classif) > len(filteredEntries[j].Classif) })
-						return filteredEntries[0].Code, key, filteredEntries[0].Classif, "exata_filtered"
-					}
-				}
-			}
-
-			cmFiltered := closestmatch.New(candidateKeysFiltered, []int{4, 5, 6})
-			match := cmFiltered.Closest(key)
-			if match != "" {
-				entries := contasEntries[match]
-				filteredEntries := filterEntriesByPrefixReceitas(entries, classPrefixes)
-				if len(filteredEntries) > 0 {
-					sort.Slice(filteredEntries, func(i, j int) bool { return len(filteredEntries[i].Classif) > len(filteredEntries[j].Classif) })
-					return filteredEntries[0].Code, match, filteredEntries[0].Classif, "fuzzy_filtered"
+			if len(matchingEntries) > 0 {
+				searchEntries[k] = matchingEntries
+				if !keysMap[k] {
+					keysMap[k] = true
+					filteredKeys = append(filteredKeys, k)
 				}
 			}
 		}
+		searchKeys = filteredKeys
+		mtypeSuffix = "_filtered"
 	}
 
-	if entries, ok := contasEntries[key]; ok {
+	// 1. Busca por correspondência exata no escopo definido
+	if entries, ok := searchEntries[key]; ok && len(entries) > 0 {
 		sort.Slice(entries, func(i, j int) bool { return len(entries[i].Classif) > len(entries[j].Classif) })
-		return entries[0].Code, key, entries[0].Classif, "exata_all"
+		chosen := entries[0]
+		return chosen.Code, key, chosen.Classif, "exata" + mtypeSuffix
 	}
 
-	match := cm.Closest(key)
-	if match != "" {
-		entries := contasEntries[match]
-		sort.Slice(entries, func(i, j int) bool { return len(entries[i].Classif) > len(entries[j].Classif) })
-		return entries[0].Code, match, entries[0].Classif, "fuzzy_all"
+	// 2. Busca por proximidade no escopo definido
+	if len(searchKeys) > 0 {
+		cm := closestmatch.New(searchKeys, []int{4, 5, 6})
+		match := cm.Closest(key)
+		if match != "" {
+			entries := searchEntries[match]
+			if len(entries) > 0 {
+				sort.Slice(entries, func(i, j int) bool { return len(entries[i].Classif) > len(entries[j].Classif) })
+				chosen := entries[0]
+				return chosen.Code, match, chosen.Classif, "fuzzy" + mtypeSuffix
+			}
+		}
 	}
 
 	return "99999999", "", "", "nao_encontrada"
