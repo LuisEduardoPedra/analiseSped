@@ -182,3 +182,39 @@ type ReceitasAcisaOutputRow struct {
 	Pis         string
 	Historico   string
 }
+
+// --- Modelos de Conversores Atolini ---
+
+// ContaAtolini representa uma conta genérica para os conversores Atolini.
+type ContaAtolini struct {
+	Code    string
+	Classif string
+	Desc    string
+}
+
+// AtoliniPagamentosOutputRow representa uma linha do CSV de saída para Atolini Pagamentos.
+type AtoliniPagamentosOutputRow struct {
+	Data             string
+	Debito           string
+	DescricaoConta   string
+	Credito          string
+	DescricaoCredito string
+	Valor            string
+	Historico        string
+}
+
+// AtoliniRecebimentosOutputRow representa uma linha do CSV de saída para Atolini Recebimentos.
+type AtoliniRecebimentosOutputRow struct {
+	Data             string
+	DescricaoCredito string
+	ContaCredito     string
+	DescricaoDebito  string
+	ContaDebito      string
+	Historico        string
+	ValorPrincipal   string
+	Juros            string
+	Desconto         string
+	DespBanco        string
+	DespCartorio     string
+	VlLiqPago        string
+}

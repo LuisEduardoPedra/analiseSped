@@ -26,6 +26,8 @@ import (
 type Service interface {
 	ProcessSicrediFiles(lancamentosFile io.Reader, contasFile io.Reader, lancamentosFilename string, classPrefixes []string) ([]byte, error)
 	ProcessReceitasAcisaFiles(excelFile io.Reader, contasFile io.Reader, excelFilename string, classPrefixes []string) ([]byte, error)
+	ProcessAtoliniPagamentos(excelFile io.Reader, contasFile io.Reader, classPrefixes []string) ([]byte, error)
+	ProcessAtoliniRecebimentos(csvFile io.Reader, contasFile io.Reader, classPrefixes []string) ([]byte, error)
 }
 
 type service struct{}
@@ -318,14 +320,12 @@ func (svc *service) processarGrupoSicredi(grupo []domain.Lancamento, finalRows *
 	}
 }
 
-// **NOVA LÓGICA DE MATCH PARA SICREDI**
 func (svc *service) matchContaSicredi(descricao string, contasEntries map[string][]domain.ContaSicredi, allKeys []string, classPrefixes []string) (code, matchedKey, matchedClass, mtype string) {
 	key := svc.normalizeText(descricao)
 	if key == "" {
 		return "99999999", "", "", "nao_aplicavel"
 	}
 
-	// Define o escopo da busca: filtrado ou global
 	searchEntries := contasEntries
 	searchKeys := allKeys
 	mtypeSuffix := "_all"
@@ -341,7 +341,7 @@ func (svc *service) matchContaSicredi(descricao string, contasEntries map[string
 				for _, p := range classPrefixes {
 					if strings.HasPrefix(entry.Classif, p) {
 						matchingEntries = append(matchingEntries, entry)
-						break // Evita adicionar a mesma entrada múltiplas vezes
+						break
 					}
 				}
 			}
@@ -357,14 +357,12 @@ func (svc *service) matchContaSicredi(descricao string, contasEntries map[string
 		mtypeSuffix = "_filtered"
 	}
 
-	// 1. Busca por correspondência exata no escopo definido
 	if entries, ok := searchEntries[key]; ok && len(entries) > 0 {
 		sort.Slice(entries, func(i, j int) bool { return len(entries[i].Classif) > len(entries[j].Classif) })
 		chosen := entries[0]
 		return chosen.Code, key, chosen.Classif, "exata" + mtypeSuffix
 	}
 
-	// 2. Busca por proximidade no escopo definido
 	if len(searchKeys) > 0 {
 		cm := closestmatch.New(searchKeys, []int{3, 4})
 		match := cm.Closest(key)
@@ -430,7 +428,6 @@ func (svc *service) ProcessReceitasAcisaFiles(excelFile io.Reader, contasFile io
 		var descricao string
 		if entries, ok := contasEntries[matchedKey]; ok {
 			var chosenDesc string
-			// A escolha da descrição também deve respeitar o filtro
 			filteredEntries := entries
 			if len(classPrefixes) > 0 {
 				var tempFiltered []domain.ContaReceitasAcisa
@@ -455,7 +452,7 @@ func (svc *service) ProcessReceitasAcisaFiles(excelFile io.Reader, contasFile io
 				if chosenDesc == "" {
 					chosenDesc = filteredEntries[0].Desc
 				}
-			} else if len(entries) > 0 { // Fallback (não deveria ser necessário)
+			} else if len(entries) > 0 {
 				chosenDesc = entries[0].Desc
 			}
 			descricao = chosenDesc
@@ -609,14 +606,12 @@ func (svc *service) loadAndPrepareExcelReceitas(excelFile io.Reader) ([]map[stri
 	return data, nil
 }
 
-// **NOVA LÓGICA DE MATCH PARA RECEITAS ACISA**
 func (svc *service) matchContaReceitas(descricao string, contasEntries map[string][]domain.ContaReceitasAcisa, allKeys []string, classPrefixes []string) (code, matchedKey, matchedClass, mtype string) {
 	key := svc.normalizeText(descricao)
 	if key == "" {
 		return "99999999", "", "", "nao_aplicavel"
 	}
 
-	// Define o escopo da busca: filtrado ou global
 	searchEntries := contasEntries
 	searchKeys := allKeys
 	mtypeSuffix := "_all"
@@ -648,14 +643,12 @@ func (svc *service) matchContaReceitas(descricao string, contasEntries map[strin
 		mtypeSuffix = "_filtered"
 	}
 
-	// 1. Busca por correspondência exata no escopo definido
 	if entries, ok := searchEntries[key]; ok && len(entries) > 0 {
 		sort.Slice(entries, func(i, j int) bool { return len(entries[i].Classif) > len(entries[j].Classif) })
 		chosen := entries[0]
 		return chosen.Code, key, chosen.Classif, "exata" + mtypeSuffix
 	}
 
-	// 2. Busca por proximidade no escopo definido
 	if len(searchKeys) > 0 {
 		cm := closestmatch.New(searchKeys, []int{4, 5, 6})
 		match := cm.Closest(key)
@@ -692,4 +685,299 @@ func (svc *service) gerarCSVReceitasAcisa(rows []domain.ReceitasAcisaOutputRow) 
 
 	writer.Flush()
 	return buffer.Bytes(), writer.Error()
+}
+
+// #############################################################################
+// #                         CONVERSOR ATOLINI PAGAMENTOS                        #
+// #############################################################################
+
+func (svc *service) ProcessAtoliniPagamentos(excelFile io.Reader, contasFile io.Reader, classPrefixes []string) ([]byte, error) {
+	contasEntries, allKeys, err := svc.loadContasAtolini(contasFile)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao carregar arquivo de contas: %w", err)
+	}
+
+	lancamentos, err := svc.loadExcelAtolini(excelFile)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao carregar arquivo de lançamentos: %w", err)
+	}
+
+	var finalRows []domain.AtoliniPagamentosOutputRow
+	var dataAtual string
+
+	for _, row := range lancamentos {
+		c0 := getCell(row, 0)
+		if c0 != "" && strings.Contains(strings.ToLower(c0), "data de pagamento") {
+			dataStr := getCell(row, 2)
+			if t, err := time.Parse("02/01/2006", dataStr); err == nil {
+				dataAtual = t.Format("02/01/2006")
+			}
+			continue
+		}
+
+		if _, err := strconv.Atoi(strings.TrimSpace(c0)); err == nil && getCell(row, 19) != "" {
+			descSegColuna := getCell(row, 1)
+			historico := getCell(row, 3)
+			valor, _ := svc.parseBRLNumber(getCell(row, 9))
+			descColT := getCell(row, 19)
+
+			debitoID, _, _, _ := svc.matchContaAtolini(descSegColuna, contasEntries, allKeys, classPrefixes)
+			creditoID, _, _, _ := svc.matchContaAtolini(descColT, contasEntries, allKeys, classPrefixes)
+
+			finalRows = append(finalRows, domain.AtoliniPagamentosOutputRow{
+				Data:             dataAtual,
+				Debito:           debitoID,
+				DescricaoConta:   descSegColuna,
+				Credito:          creditoID,
+				DescricaoCredito: descColT,
+				Valor:            svc.formatTwoDecimalsComma(valor),
+				Historico:        historico,
+			})
+		}
+	}
+
+	return svc.gerarCSVAtoliniPagamentos(finalRows)
+}
+
+// #############################################################################
+// #                        CONVERSOR ATOLINI RECEBIMENTOS                       #
+// #############################################################################
+
+func (svc *service) ProcessAtoliniRecebimentos(csvFile io.Reader, contasFile io.Reader, classPrefixes []string) ([]byte, error) {
+	contasEntries, allKeys, err := svc.loadContasAtolini(contasFile)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao carregar arquivo de contas: %w", err)
+	}
+
+	lancamentos, err := svc.loadCSVAtolini(csvFile)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao carregar arquivo de lançamentos: %w", err)
+	}
+
+	var finalRows []domain.AtoliniRecebimentosOutputRow
+	var dataAtual, descDebito, contaDebito string
+
+	for _, row := range lancamentos {
+		c0 := getCell(row, 0)
+
+		if strings.HasPrefix(strings.ToUpper(c0), "DATA:") {
+			dataStr := getCell(row, 1)
+			if t, err := time.Parse("02/01/2006", dataStr); err == nil {
+				dataAtual = t.Format("02/01/2006")
+			}
+			continue
+		}
+
+		if strings.Contains(strings.ToUpper(c0), "PORTADOR DO PAGAMENTO") {
+			descDebito = getCell(row, 3)
+			contaDebito, _, _, _ = svc.matchContaAtolini(descDebito, contasEntries, allKeys, classPrefixes)
+			continue
+		}
+
+		match, _ := regexp.MatchString(`^\s*\d+\s*-\s*.+$`, c0)
+		if match {
+			descCredito := strings.TrimSpace(strings.SplitN(c0, "-", 2)[1])
+			contaCredito, _, _, _ := svc.matchContaAtolini(descCredito, contasEntries, allKeys, classPrefixes)
+
+			c5 := getCell(row, 4)
+			c9 := getCell(row, 9)
+			historico := fmt.Sprintf("%s CONFORME DOCUMENTO %s DE %s", strings.TrimSpace(c9), strings.TrimSpace(c5), descCredito)
+
+			vPrincipal, _ := svc.parseBRLNumber(getCell(row, 12))
+			vJuros, _ := svc.parseBRLNumber(getCell(row, 13))
+			vDesc, _ := svc.parseBRLNumber(getCell(row, 14))
+			vDespBco, _ := svc.parseBRLNumber(getCell(row, 15))
+			vDespCart, _ := svc.parseBRLNumber(getCell(row, 16))
+			vVlliq, _ := svc.parseBRLNumber(getCell(row, 17))
+
+			finalRows = append(finalRows, domain.AtoliniRecebimentosOutputRow{
+				Data:             dataAtual,
+				DescricaoCredito: descCredito,
+				ContaCredito:     contaCredito,
+				DescricaoDebito:  descDebito,
+				ContaDebito:      contaDebito,
+				Historico:        historico,
+				ValorPrincipal:   svc.formatTwoDecimalsComma(vPrincipal),
+				Juros:            svc.formatTwoDecimalsComma(vJuros),
+				Desconto:         svc.formatTwoDecimalsComma(vDesc),
+				DespBanco:        svc.formatTwoDecimalsComma(vDespBco),
+				DespCartorio:     svc.formatTwoDecimalsComma(vDespCart),
+				VlLiqPago:        svc.formatTwoDecimalsComma(vVlliq),
+			})
+		}
+	}
+
+	return svc.gerarCSVAtoliniRecebimentos(finalRows)
+}
+
+// --- Funções de Apoio para Conversores Atolini ---
+
+func (svc *service) loadContasAtolini(contasFile io.Reader) (map[string][]domain.ContaAtolini, []string, error) {
+	decoder := charmap.ISO8859_1.NewDecoder()
+	reader := csv.NewReader(transform.NewReader(contasFile, decoder))
+	reader.Comma = ';'
+	reader.LazyQuotes = true
+	reader.FieldsPerRecord = -1
+
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	contasEntries := make(map[string][]domain.ContaAtolini)
+	var allKeys []string
+	keysMap := make(map[string]bool)
+
+	for _, record := range records {
+		if len(record) < 3 {
+			continue
+		}
+		code := strings.TrimSpace(record[0])
+		classif := strings.TrimSpace(record[1])
+		desc := strings.TrimSpace(record[2])
+		key := svc.normalizeText(desc)
+
+		if key == "" {
+			continue
+		}
+
+		entry := domain.ContaAtolini{Code: code, Classif: classif, Desc: desc}
+		contasEntries[key] = append(contasEntries[key], entry)
+
+		if !keysMap[key] {
+			keysMap[key] = true
+			allKeys = append(allKeys, key)
+		}
+	}
+	return contasEntries, allKeys, nil
+}
+
+func (svc *service) loadExcelAtolini(excelFile io.Reader) ([][]string, error) {
+	f, err := excelize.OpenReader(excelFile)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	sheetName := f.GetSheetList()[0]
+	return f.GetRows(sheetName)
+}
+
+func (svc *service) loadCSVAtolini(csvFile io.Reader) ([][]string, error) {
+	decoder := charmap.ISO8859_1.NewDecoder()
+	reader := csv.NewReader(transform.NewReader(csvFile, decoder))
+	reader.Comma = ';'
+	reader.LazyQuotes = true
+	reader.FieldsPerRecord = -1
+	return reader.ReadAll()
+}
+
+func (svc *service) matchContaAtolini(descricao string, contasEntries map[string][]domain.ContaAtolini, allKeys []string, classPrefixes []string) (code, matchedKey, matchedClass, mtype string) {
+	key := svc.normalizeText(descricao)
+	if key == "" {
+		return "999999", "", "", "nao_aplicavel"
+	}
+
+	searchEntries := contasEntries
+	searchKeys := allKeys
+	mtypeSuffix := "_all"
+
+	if len(classPrefixes) > 0 {
+		searchEntries = make(map[string][]domain.ContaAtolini)
+		var filteredKeys []string
+		keysMap := make(map[string]bool)
+
+		for k, entries := range contasEntries {
+			var matchingEntries []domain.ContaAtolini
+			for _, entry := range entries {
+				for _, p := range classPrefixes {
+					if strings.HasPrefix(entry.Classif, p) {
+						matchingEntries = append(matchingEntries, entry)
+						break
+					}
+				}
+			}
+			if len(matchingEntries) > 0 {
+				searchEntries[k] = matchingEntries
+				if !keysMap[k] {
+					keysMap[k] = true
+					filteredKeys = append(filteredKeys, k)
+				}
+			}
+		}
+		searchKeys = filteredKeys
+		mtypeSuffix = "_filtered"
+	}
+
+	if entries, ok := searchEntries[key]; ok && len(entries) > 0 {
+		sort.Slice(entries, func(i, j int) bool { return len(entries[i].Classif) > len(entries[j].Classif) })
+		chosen := entries[0]
+		return chosen.Code, key, chosen.Classif, "exata" + mtypeSuffix
+	}
+
+	if len(searchKeys) > 0 {
+		cm := closestmatch.New(searchKeys, []int{4, 5, 6})
+		match := cm.Closest(key)
+		if match != "" {
+			entries := searchEntries[match]
+			if len(entries) > 0 {
+				sort.Slice(entries, func(i, j int) bool { return len(entries[i].Classif) > len(entries[j].Classif) })
+				chosen := entries[0]
+				return chosen.Code, match, chosen.Classif, "fuzzy" + mtypeSuffix
+			}
+		}
+	}
+
+	return "999999", "", "", "nao_encontrada"
+}
+
+func (svc *service) gerarCSVAtoliniPagamentos(rows []domain.AtoliniPagamentosOutputRow) ([]byte, error) {
+	var buffer bytes.Buffer
+	encoder := charmap.Windows1252.NewEncoder()
+	writer := csv.NewWriter(transform.NewWriter(&buffer, encoder))
+	writer.Comma = ';'
+
+	header := []string{"Data", "Debito", "Descição conta", "Credito", "Descrição Crédito", "Valor", "histórico"}
+	if err := writer.Write(header); err != nil {
+		return nil, err
+	}
+
+	for _, row := range rows {
+		record := []string{row.Data, row.Debito, row.DescricaoConta, row.Credito, row.DescricaoCredito, row.Valor, row.Historico}
+		if err := writer.Write(record); err != nil {
+			return nil, err
+		}
+	}
+
+	writer.Flush()
+	return buffer.Bytes(), writer.Error()
+}
+
+func (svc *service) gerarCSVAtoliniRecebimentos(rows []domain.AtoliniRecebimentosOutputRow) ([]byte, error) {
+	var buffer bytes.Buffer
+	encoder := charmap.Windows1252.NewEncoder()
+	writer := csv.NewWriter(transform.NewWriter(&buffer, encoder))
+	writer.Comma = ';'
+
+	header := []string{"Data", "Descrição Credito", "conta crédito", "Descrição Débito", "conta Debito", "Histórico", "valor Principal", "Juros", "Desconto", "Desp Banco", "Desp Cartório", "VlLiq Pago"}
+	if err := writer.Write(header); err != nil {
+		return nil, err
+	}
+
+	for _, row := range rows {
+		record := []string{row.Data, row.DescricaoCredito, row.ContaCredito, row.DescricaoDebito, row.ContaDebito, row.Historico, row.ValorPrincipal, row.Juros, row.Desconto, row.DespBanco, row.DespCartorio, row.VlLiqPago}
+		if err := writer.Write(record); err != nil {
+			return nil, err
+		}
+	}
+
+	writer.Flush()
+	return buffer.Bytes(), writer.Error()
+}
+
+func getCell(row []string, index int) string {
+	if index >= 0 && index < len(row) {
+		return strings.TrimSpace(row[index])
+	}
+	return ""
 }
