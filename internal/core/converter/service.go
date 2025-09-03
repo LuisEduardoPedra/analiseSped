@@ -709,11 +709,13 @@ func (svc *service) ProcessAtoliniPagamentos(excelFile io.Reader, contasFile io.
 		c0 := getCell(row, 0)
 		if c0 != "" && strings.Contains(strings.ToLower(c0), "data de pagamento") {
 			dataStr := getCell(row, 2)
-			// Tenta múltiplos formatos de data
+			// **CORREÇÃO: Adicionada verificação de comprimento da string antes de fatiar**
 			if t, pErr := time.Parse("02/01/2006", dataStr); pErr == nil {
 				dataAtual = t.Format("02/01/2006")
-			} else if t, pErr2 := time.Parse("2006-01-02", dataStr[:10]); pErr2 == nil {
-				dataAtual = t.Format("02/01/2006")
+			} else if len(dataStr) >= 10 {
+				if t, pErr2 := time.Parse("2006-01-02", dataStr[:10]); pErr2 == nil {
+					dataAtual = t.Format("02/01/2006")
+				}
 			}
 			continue
 		}
