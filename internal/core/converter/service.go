@@ -697,7 +697,7 @@ func (svc *service) ProcessAtoliniPagamentos(excelFile io.Reader, contasFile io.
 		return nil, fmt.Errorf("erro ao carregar arquivo de contas: %w", err)
 	}
 
-	lancamentos, err := svc.loadExcelAtolini(excelFile)
+	lancamentos, err := svc.loadGenericExcel(excelFile)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao carregar arquivo de lançamentos: %w", err)
 	}
@@ -709,7 +709,10 @@ func (svc *service) ProcessAtoliniPagamentos(excelFile io.Reader, contasFile io.
 		c0 := getCell(row, 0)
 		if c0 != "" && strings.Contains(strings.ToLower(c0), "data de pagamento") {
 			dataStr := getCell(row, 2)
-			if t, err := time.Parse("02/01/2006", dataStr); err == nil {
+			// Tenta múltiplos formatos de data
+			if t, pErr := time.Parse("02/01/2006", dataStr); pErr == nil {
+				dataAtual = t.Format("02/01/2006")
+			} else if t, pErr2 := time.Parse("2006-01-02", dataStr[:10]); pErr2 == nil {
 				dataAtual = t.Format("02/01/2006")
 			}
 			continue
@@ -743,6 +746,8 @@ func (svc *service) ProcessAtoliniPagamentos(excelFile io.Reader, contasFile io.
 // #                        CONVERSOR ATOLINI RECEBIMENTOS                       #
 // #############################################################################
 
+var atoliniRecebimentoLancamentoRegex = regexp.MustCompile(`^\s*\d+\s*-\s*.+$`)
+
 func (svc *service) ProcessAtoliniRecebimentos(csvFile io.Reader, contasFile io.Reader, classPrefixes []string) ([]byte, error) {
 	contasEntries, allKeys, err := svc.loadContasAtolini(contasFile)
 	if err != nil {
@@ -774,8 +779,7 @@ func (svc *service) ProcessAtoliniRecebimentos(csvFile io.Reader, contasFile io.
 			continue
 		}
 
-		match, _ := regexp.MatchString(`^\s*\d+\s*-\s*.+$`, c0)
-		if match {
+		if atoliniRecebimentoLancamentoRegex.MatchString(c0) {
 			descCredito := strings.TrimSpace(strings.SplitN(c0, "-", 2)[1])
 			contaCredito, _, _, _ := svc.matchContaAtolini(descCredito, contasEntries, allKeys, classPrefixes)
 
@@ -852,15 +856,42 @@ func (svc *service) loadContasAtolini(contasFile io.Reader) (map[string][]domain
 	return contasEntries, allKeys, nil
 }
 
-func (svc *service) loadExcelAtolini(excelFile io.Reader) ([][]string, error) {
-	f, err := excelize.OpenReader(excelFile)
+func (svc *service) loadGenericExcel(file io.Reader) ([][]string, error) {
+	data, err := io.ReadAll(file)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	reader := bytes.NewReader(data)
 
-	sheetName := f.GetSheetList()[0]
-	return f.GetRows(sheetName)
+	f, err := excelize.OpenReader(reader)
+	if err == nil {
+		defer f.Close()
+		sheetName := f.GetSheetList()[0]
+		return f.GetRows(sheetName)
+	}
+
+	reader.Seek(0, io.SeekStart)
+	workbook, err := xls.OpenReader(reader)
+	if err == nil {
+		if len(workbook.GetSheets()) > 0 {
+			sheet, err := workbook.GetSheet(0)
+			if err != nil {
+				return nil, fmt.Errorf("erro ao obter planilha do arquivo .xls: %w", err)
+			}
+			var allRows [][]string
+			for _, row := range sheet.GetRows() {
+				var csvRow []string
+				for _, cell := range row.GetCols() {
+					csvRow = append(csvRow, cell.GetString())
+				}
+				allRows = append(allRows, csvRow)
+			}
+			return allRows, nil
+		}
+		return nil, fmt.Errorf("o arquivo .xls não contém planilhas")
+	}
+
+	return nil, fmt.Errorf("unsupported workbook file format")
 }
 
 func (svc *service) loadCSVAtolini(csvFile io.Reader) ([][]string, error) {
