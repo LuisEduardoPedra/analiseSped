@@ -24,6 +24,23 @@ func NewConverterHandler(service converter.Service) *ConverterHandler {
 	}
 }
 
+// getPrefixesFromForm extrai e limpa os prefixos de um campo de formulário.
+func getPrefixesFromForm(c *gin.Context, formKey string) []string {
+	prefixesStr := c.PostForm(formKey)
+	if prefixesStr == "" {
+		return nil
+	}
+	parts := strings.Split(prefixesStr, ",")
+	var prefixes []string
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			prefixes = append(prefixes, trimmed)
+		}
+	}
+	return prefixes
+}
+
 // HandleSicrediConversion lida com a conversão de arquivos do Sicredi (francesinha).
 func (h *ConverterHandler) HandleSicrediConversion(c *gin.Context) {
 	lancamentosFileHeader, err := c.FormFile("lancamentosFile")
@@ -44,17 +61,7 @@ func (h *ConverterHandler) HandleSicrediConversion(c *gin.Context) {
 		return
 	}
 
-	classPrefixesStr := c.PostForm("classPrefixes")
-	var classPrefixes []string
-	if classPrefixesStr != "" {
-		parts := strings.Split(classPrefixesStr, ",")
-		for _, part := range parts {
-			trimmed := strings.TrimSpace(part)
-			if trimmed != "" {
-				classPrefixes = append(classPrefixes, trimmed)
-			}
-		}
-	}
+	classPrefixes := getPrefixesFromForm(c, "classPrefixes")
 
 	lancamentosFile, err := lancamentosFileHeader.Open()
 	if err != nil {
@@ -102,17 +109,7 @@ func (h *ConverterHandler) HandleReceitasAcisaConversion(c *gin.Context) {
 		return
 	}
 
-	classPrefixesStr := c.PostForm("classPrefixes")
-	var classPrefixes []string
-	if classPrefixesStr != "" {
-		parts := strings.Split(classPrefixesStr, ",")
-		for _, part := range parts {
-			trimmed := strings.TrimSpace(part)
-			if trimmed != "" {
-				classPrefixes = append(classPrefixes, trimmed)
-			}
-		}
-	}
+	classPrefixes := getPrefixesFromForm(c, "classPrefixes")
 
 	excelFile, err := excelFileHeader.Open()
 	if err != nil {
@@ -142,7 +139,7 @@ func (h *ConverterHandler) HandleReceitasAcisaConversion(c *gin.Context) {
 
 // HandleAtoliniPagamentosConversion lida com a conversão de pagamentos Atolini.
 func (h *ConverterHandler) HandleAtoliniPagamentosConversion(c *gin.Context) {
-	excelFileHeader, err := c.FormFile("lancamentosFile") // Usa o mesmo nome de campo para consistência
+	excelFileHeader, err := c.FormFile("lancamentosFile")
 	if err != nil {
 		responses.Error(c, http.StatusBadRequest, "Arquivo de Lançamentos (.xls, .xlsx) não encontrado ou inválido")
 		return
@@ -154,17 +151,9 @@ func (h *ConverterHandler) HandleAtoliniPagamentosConversion(c *gin.Context) {
 		return
 	}
 
-	classPrefixesStr := c.PostForm("classPrefixes")
-	var classPrefixes []string
-	if classPrefixesStr != "" {
-		parts := strings.Split(classPrefixesStr, ",")
-		for _, part := range parts {
-			trimmed := strings.TrimSpace(part)
-			if trimmed != "" {
-				classPrefixes = append(classPrefixes, trimmed)
-			}
-		}
-	}
+	// CORREÇÃO: Lê os dois novos parâmetros de filtro
+	debitPrefixes := getPrefixesFromForm(c, "debitClassPrefixes")
+	creditPrefixes := getPrefixesFromForm(c, "creditClassPrefixes")
 
 	excelFile, err := excelFileHeader.Open()
 	if err != nil {
@@ -180,7 +169,8 @@ func (h *ConverterHandler) HandleAtoliniPagamentosConversion(c *gin.Context) {
 	}
 	defer contasFile.Close()
 
-	outputCSV, err := h.service.ProcessAtoliniPagamentos(excelFile, contasFile, classPrefixes)
+	// CORREÇÃO: Passa os dois filtros para o serviço
+	outputCSV, err := h.service.ProcessAtoliniPagamentos(excelFile, contasFile, debitPrefixes, creditPrefixes)
 	if err != nil {
 		fmt.Printf("Erro ao processar arquivos para Atolini Pagamentos: %v\n", err)
 		responses.Error(c, http.StatusInternalServerError, "Erro ao processar os arquivos", err.Error())
@@ -194,7 +184,7 @@ func (h *ConverterHandler) HandleAtoliniPagamentosConversion(c *gin.Context) {
 
 // HandleAtoliniRecebimentosConversion lida com a conversão de recebimentos Atolini.
 func (h *ConverterHandler) HandleAtoliniRecebimentosConversion(c *gin.Context) {
-	csvFileHeader, err := c.FormFile("lancamentosFile") // Usa o mesmo nome de campo
+	csvFileHeader, err := c.FormFile("lancamentosFile")
 	if err != nil {
 		responses.Error(c, http.StatusBadRequest, "Arquivo de Lançamentos (.csv) não encontrado ou inválido")
 		return
@@ -206,17 +196,7 @@ func (h *ConverterHandler) HandleAtoliniRecebimentosConversion(c *gin.Context) {
 		return
 	}
 
-	classPrefixesStr := c.PostForm("classPrefixes")
-	var classPrefixes []string
-	if classPrefixesStr != "" {
-		parts := strings.Split(classPrefixesStr, ",")
-		for _, part := range parts {
-			trimmed := strings.TrimSpace(part)
-			if trimmed != "" {
-				classPrefixes = append(classPrefixes, trimmed)
-			}
-		}
-	}
+	classPrefixes := getPrefixesFromForm(c, "classPrefixes")
 
 	csvFile, err := csvFileHeader.Open()
 	if err != nil {
