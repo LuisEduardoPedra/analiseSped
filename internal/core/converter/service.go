@@ -1489,8 +1489,9 @@ func isLancamento(cell string) bool {
 	return recebimentoLancamentoRegex.MatchString(cell)
 }
 
-// cleanPortadorText normaliza/removes prefixos e ":" finais que possam permanecer
-// e também remove prefixo numérico tipo "748 - " quando presente.
+// cleanPortadorText normaliza o texto de portador removendo partes fixas como
+// "Portador do Pagamento" ou ":" finais, preservando porém eventuais
+// prefixos numéricos (ex: "7 - BANCO...") para que apareçam no CSV.
 func cleanPortadorText(s string) string {
 	if s == "" {
 		return ""
@@ -1504,14 +1505,13 @@ func cleanPortadorText(s string) string {
 		idx := strings.Index(u, "PORTADOR DO PAGAMENTO")
 		rest := strings.TrimSpace(s[idx+len("PORTADOR DO PAGAMENTO"):])
 		s = rest
+		u = strings.ToUpper(s)
 	}
 	if strings.HasPrefix(u, "PORTADOR") {
 		idx := strings.Index(u, "PORTADOR")
 		rest := strings.TrimSpace(s[idx+len("PORTADOR"):])
 		s = rest
 	}
-	// remover prefixo numerico/hifen inicial "123 - " ou "123-"
-	s = stripLeadingNumberPrefix(s)
 	return strings.TrimSpace(s)
 }
 
@@ -1534,8 +1534,9 @@ func stripLeadingNumberPrefix(s string) string {
 	return s
 }
 
-// pickPortadorFromRow tenta extrair o nome do portador a partir de colunas próximas ao marcador
-// IGNORA expressamente células que contenham o próprio marcador ("PORTADOR...") ou que pareçam um lançamento "123 - ...".
+// pickPortadorFromRow tenta extrair o nome do portador a partir de colunas próximas ao marcador.
+// Portadores podem iniciar com código numérico ("7 - BANCO ..."), portanto não
+// descartamos valores que combinem esse padrão.
 func pickPortadorFromRow(row []string, markerIdx int) string {
 	// primeiro: se o próprio marcador tem conteúdo após ":" (ex: "Portador do Pagamento: 7 - BANCO ...")
 	if markerIdx >= 0 && markerIdx < len(row) {
@@ -1544,7 +1545,7 @@ func pickPortadorFromRow(row []string, markerIdx int) string {
 			// tentar extrair parte após ":" se houver
 			if idx := strings.Index(valMarker, ":"); idx != -1 && idx+1 < len(valMarker) {
 				part := strings.TrimSpace(valMarker[idx+1:])
-				if part != "" && !isPortadorMarker(part) && !recebimentoLancamentoRegex.MatchString(part) {
+				if part != "" && !isPortadorMarker(part) {
 					cleaned := cleanPortadorText(part)
 					if cleaned != "" {
 						return cleaned
@@ -1580,10 +1581,6 @@ func pickPortadorFromRow(row []string, markerIdx int) string {
 		if isPortadorMarker(val) {
 			continue
 		}
-		// ignorar se parece um lançamento (ex: '901 - ...')
-		if recebimentoLancamentoRegex.MatchString(val) {
-			continue
-		}
 		// Se chegou aqui, é um candidato. limpar e retornar.
 		cleaned := cleanPortadorText(val)
 		if cleaned == "" {
@@ -1611,21 +1608,16 @@ func findLastPortadorBefore(sheet [][]string, idx int, lookback int) (string, bo
 			}
 			// fallback: procurar célula à direita
 			for j := pIdx + 1; j <= pIdx+6 && j < len(row); j++ {
-				if row[j] != "" && !recebimentoLancamentoRegex.MatchString(row[j]) {
+				if row[j] != "" {
 					return cleanPortadorText(row[j]), true
 				}
 			}
 		}
 		// caso a própria linha contenha um "NNN - NOME DO PORTADOR" sem marcador
 		for _, c := range row {
-			if recebimentoLancamentoRegex.MatchString(c) {
-				// ignora linhas que são lançamentos; não são portadores
-				continue
-			}
-			// se uma célula parece "7 - BANCO ..." e não é lançamento típico para recebimento (diferenciação simples)
 			if m := regexp.MustCompile(`^\s*\d+\s*-\s*.+`).FindString(c); m != "" {
 				// interpretar como possível portador (cuidado: pode ser um lançamento)
-				// heurística: se a linha tem poucas colunas numéricas (provavel header de portador), aceitar
+				// heurística: se a linha tem poucas colunas não vazias (provável header de portador), aceitar
 				nonEmpty := 0
 				for _, cc := range row {
 					if strings.TrimSpace(cc) != "" {
@@ -1691,9 +1683,6 @@ func (svc *service) ProcessAtoliniRecebimentos(excelFile io.Reader, contasFile i
 					if candidate == "" {
 						continue
 					}
-					if recebimentoLancamentoRegex.MatchString(candidate) {
-						continue
-					}
 					descDeb = cleanPortadorText(candidate)
 					if descDeb != "" {
 						break
@@ -1702,7 +1691,7 @@ func (svc *service) ProcessAtoliniRecebimentos(excelFile io.Reader, contasFile i
 			}
 			// setar current
 			descDeb = strings.TrimSpace(descDeb)
-			if descDeb == "" || recebimentoLancamentoRegex.MatchString(descDeb) {
+			if descDeb == "" {
 				currentDescDebito = ""
 				currentCodDebito = "999999"
 			} else {
