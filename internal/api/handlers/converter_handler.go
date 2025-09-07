@@ -196,7 +196,10 @@ func (h *ConverterHandler) HandleAtoliniRecebimentosConversion(c *gin.Context) {
 		return
 	}
 
-	classPrefixes := getPrefixesFromForm(c, "classPrefixes")
+	// Combina os prefixos de classe recebidos para débito e crédito
+	debitPrefixes := getPrefixesFromForm(c, "debitPrefixes")
+	creditPrefixes := getPrefixesFromForm(c, "creditPrefixes")
+	classPrefixes := append(debitPrefixes, creditPrefixes...)
 
 	csvFile, err := csvFileHeader.Open()
 	if err != nil {
