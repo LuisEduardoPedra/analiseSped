@@ -184,9 +184,9 @@ func (h *ConverterHandler) HandleAtoliniPagamentosConversion(c *gin.Context) {
 
 // HandleAtoliniRecebimentosConversion lida com a conversão de recebimentos Atolini.
 func (h *ConverterHandler) HandleAtoliniRecebimentosConversion(c *gin.Context) {
-	csvFileHeader, err := c.FormFile("lancamentosFile")
+	excelFileHeader, err := c.FormFile("lancamentosFile")
 	if err != nil {
-		responses.Error(c, http.StatusBadRequest, "Arquivo de Lançamentos (.csv) não encontrado ou inválido")
+		responses.Error(c, http.StatusBadRequest, "Arquivo de Lançamentos (.xls, .xlsx) não encontrado ou inválido")
 		return
 	}
 
@@ -196,17 +196,15 @@ func (h *ConverterHandler) HandleAtoliniRecebimentosConversion(c *gin.Context) {
 		return
 	}
 
-	// Combina os prefixos de classe recebidos para débito e crédito
 	debitPrefixes := getPrefixesFromForm(c, "debitPrefixes")
 	creditPrefixes := getPrefixesFromForm(c, "creditPrefixes")
-	classPrefixes := append(debitPrefixes, creditPrefixes...)
 
-	csvFile, err := csvFileHeader.Open()
+	excelFile, err := excelFileHeader.Open()
 	if err != nil {
 		responses.Error(c, http.StatusInternalServerError, "Não foi possível abrir o arquivo de Lançamentos")
 		return
 	}
-	defer csvFile.Close()
+	defer excelFile.Close()
 
 	contasFile, err := contasFileHeader.Open()
 	if err != nil {
@@ -215,7 +213,7 @@ func (h *ConverterHandler) HandleAtoliniRecebimentosConversion(c *gin.Context) {
 	}
 	defer contasFile.Close()
 
-	outputCSV, err := h.service.ProcessAtoliniRecebimentos(csvFile, contasFile, classPrefixes)
+	outputCSV, err := h.service.ProcessAtoliniRecebimentos(excelFile, contasFile, debitPrefixes, creditPrefixes)
 	if err != nil {
 		fmt.Printf("Erro ao processar arquivos para Atolini Recebimentos: %v\n", err)
 		responses.Error(c, http.StatusInternalServerError, "Erro ao processar os arquivos", err.Error())
