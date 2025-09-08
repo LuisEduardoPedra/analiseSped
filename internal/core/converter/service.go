@@ -1121,30 +1121,15 @@ func (svc *service) ProcessAtoliniPagamentos(excelFile io.Reader, contasFile io.
 	var dataAtual string
 
 	for i, row := range lancamentos {
-		// tentar detectar uma data explícita na linha (evita capturar números como datas)
-		if d, ok := svc.findDateInRow(row); ok {
+		// A data válida está na coluna C (índice 2).
+		if d, ok := svc.findDateInRow([]string{getCell(row, 2)}); ok {
 			dataAtual = d
 		}
 
 		c0 := getCell(row, 0)
-		if c0 != "" && strings.Contains(strings.ToLower(c0), "data de pagamento") {
-			dataStr := getCell(row, 2)
-			if dataStr != "" {
-				if t, pErr := time.Parse("02/01/2006", dataStr); pErr == nil {
-					dataAtual = t.Format("02/01/2006")
-				} else if len(dataStr) >= 1 {
-					if f, ferr := strconv.ParseFloat(dataStr, 64); ferr == nil {
-						// aceitar serial excel somente em intervalo plausível
-						if f > 35000 && f < 47000 {
-							dataAtual = excelSerialToDate(f).Format("02/01/2006")
-						}
-					} else if len(dataStr) >= 10 {
-						if t2, pErr2 := time.Parse("2006-01-02", dataStr[:10]); pErr2 == nil {
-							dataAtual = t2.Format("02/01/2006")
-						}
-					}
-				}
-			}
+		c0Lower := strings.ToLower(c0)
+		if c0Lower != "" && strings.Contains(c0Lower, "data de pagamento") {
+			// linha apenas informativa; data já capturada acima
 			continue
 		}
 
