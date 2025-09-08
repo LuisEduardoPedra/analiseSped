@@ -27,7 +27,7 @@ type Service interface {
 	ProcessSicrediFiles(lancamentosFile io.Reader, contasFile io.Reader, lancamentosFilename string, classPrefixes []string) ([]byte, error)
 	ProcessReceitasAcisaFiles(excelFile io.Reader, contasFile io.Reader, excelFilename string, classPrefixes []string) ([]byte, error)
 	ProcessAtoliniPagamentos(excelFile io.Reader, contasFile io.Reader, debitPrefixes []string, creditPrefixes []string) ([]byte, error)
-	ProcessAtoliniRecebimentos(excelFile io.Reader, contasFile io.Reader, classPrefixes []string) ([]byte, error)
+	ProcessAtoliniRecebimentos(excelFile io.Reader, contasFile io.Reader, debitPrefixes []string, creditPrefixes []string) ([]byte, error)
 }
 
 type service struct{}
@@ -1633,7 +1633,7 @@ func findLastPortadorBefore(sheet [][]string, idx int, lookback int) (string, bo
 	return "", false
 }
 
-func (svc *service) ProcessAtoliniRecebimentos(excelFile io.Reader, contasFile io.Reader, classPrefixes []string) ([]byte, error) {
+func (svc *service) ProcessAtoliniRecebimentos(excelFile io.Reader, contasFile io.Reader, debitPrefixes []string, creditPrefixes []string) ([]byte, error) {
 	descricaoIndex, contasMap, err := svc.lerContasRecebimentos(contasFile)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao carregar arquivo de contas: %w", err)
@@ -1696,7 +1696,7 @@ func (svc *service) ProcessAtoliniRecebimentos(excelFile io.Reader, contasFile i
 				currentCodDebito = "999999"
 			} else {
 				currentDescDebito = descDeb
-				currentCodDebito = svc.findContaCodigoByDescricao(currentDescDebito, descricaoIndex, contasMap, classPrefixes)
+				currentCodDebito = svc.findContaCodigoByDescricao(currentDescDebito, descricaoIndex, contasMap, debitPrefixes)
 				if currentCodDebito == "" {
 					currentCodDebito = "999999"
 				}
@@ -1725,7 +1725,7 @@ func (svc *service) ProcessAtoliniRecebimentos(excelFile io.Reader, contasFile i
 			if currentDescDebito == "" {
 				if p, ok := findLastPortadorBefore(rows, rIdx, 60); ok {
 					currentDescDebito = p
-					currentCodDebito = svc.findContaCodigoByDescricao(currentDescDebito, descricaoIndex, contasMap, classPrefixes)
+					currentCodDebito = svc.findContaCodigoByDescricao(currentDescDebito, descricaoIndex, contasMap, debitPrefixes)
 					if currentCodDebito == "" {
 						currentCodDebito = "999999"
 					}
@@ -1737,7 +1737,7 @@ func (svc *service) ProcessAtoliniRecebimentos(excelFile io.Reader, contasFile i
 			// remover possíveis prefixos numéricos residuais
 			descCredito = stripLeadingNumberPrefix(descCredito)
 
-			codCredito := svc.findContaCodigoByDescricao(descCredito, descricaoIndex, contasMap, classPrefixes)
+			codCredito := svc.findContaCodigoByDescricao(descCredito, descricaoIndex, contasMap, creditPrefixes)
 			if codCredito == "" {
 				codCredito = "999999"
 			}
