@@ -5,6 +5,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"strings"
 
 	"cloud.google.com/go/firestore"
 	"github.com/LuisEduardoPedra/analiseSped/internal/api/handlers"
@@ -45,9 +46,19 @@ func main() {
 	authHandler := handlers.NewAuthHandler(authService)
 	converterHandler := handlers.NewConverterHandler(converterService)
 
+	allowedOriginsEnv := os.Getenv("ALLOWED_ORIGINS")
+	if allowedOriginsEnv == "" {
+		allowedOriginsEnv = "https://analise-sped-frontend.vercel.app"
+	}
+	allowedOrigins := strings.Split(allowedOriginsEnv, ",")
+
 	router := gin.Default()
 	router.Use(func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "https://analise-sped-frontend.vercel.app")
+		origin := c.Request.Header.Get("Origin")
+		if origin != "" && (allowedOriginsEnv == "*" || containsOrigin(allowedOrigins, origin)) {
+			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+		}
+		c.Writer.Header().Set("Vary", "Origin")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization")
 		if c.Request.Method == "OPTIONS" {
@@ -90,4 +101,13 @@ func main() {
 	if err := router.Run(":" + port); err != nil {
 		log.Fatal("Falha ao iniciar o servidor: ", err)
 	}
+}
+
+func containsOrigin(origins []string, origin string) bool {
+	for _, o := range origins {
+		if strings.TrimSpace(o) == origin {
+			return true
+		}
+	}
+	return false
 }
