@@ -14,9 +14,6 @@ import (
 	"google.golang.org/api/iterator"
 )
 
-// A chave secreta agora é lida de uma variável de ambiente.
-var jwtSecret = []byte(os.Getenv("JWT_SECRET"))
-
 type Service interface {
 	Login(ctx context.Context, username, password string) (string, error)
 }
@@ -68,6 +65,7 @@ func (s *service) Login(ctx context.Context, username, password string) (string,
 		"exp":      time.Now().Add(time.Hour * 24).Unix(), // Token expira em 24 horas
 	})
 
+	jwtSecret := []byte(os.Getenv("JWT_SECRET"))
 	tokenString, err := claims.SignedString(jwtSecret)
 	if err != nil {
 		return "", errors.New("erro ao gerar token de acesso")

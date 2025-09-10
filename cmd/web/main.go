@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"log"
 	"os"
@@ -28,7 +29,36 @@ func initFirestoreClient(ctx context.Context) *firestore.Client {
 	return client
 }
 
+func loadEnv() {
+	file, err := os.Open(".env")
+	if err != nil {
+		log.Printf("Erro ao carregar .env: %v", err)
+		return
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		os.Setenv(key, value)
+	}
+	if err := scanner.Err(); err != nil {
+		log.Printf("Erro ao ler .env: %v", err)
+	}
+}
+
 func main() {
+	loadEnv()
+
 	if os.Getenv("JWT_SECRET") == "" {
 		log.Fatal("FATAL: Variável de ambiente JWT_SECRET não está configurada.")
 	}
