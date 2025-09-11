@@ -4,7 +4,6 @@ package middleware
 import (
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -13,11 +12,13 @@ import (
 
 // AuthMiddleware verifica se o token JWT é válido.
 func AuthMiddleware(jwtSecret []byte) gin.HandlerFunc {
+
 	if len(jwtSecret) == 0 {
 		if env := os.Getenv("JWT_SECRET"); env != "" {
 			jwtSecret = []byte(env)
 		}
 	}
+
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
@@ -32,6 +33,7 @@ func AuthMiddleware(jwtSecret []byte) gin.HandlerFunc {
 		}
 
 		tokenString := parts[1]
+		jwtSecret := []byte(os.Getenv("JWT_SECRET"))
 		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, fmt.Errorf("método de assinatura inesperado: %v", token.Header["alg"])
