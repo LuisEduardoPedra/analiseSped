@@ -65,7 +65,8 @@ func (s *service) Login(ctx context.Context, username, password string) (string,
 		"exp":      time.Now().Add(time.Hour * 24).Unix(), // Token expira em 24 horas
 	})
 
-	tokenString, err := claims.SignedString(s.jwtSecret)
+	jwtSecret := []byte(os.Getenv("JWT_SECRET"))
+	tokenString, err := claims.SignedString(jwtSecret)
 	if err != nil {
 		return "", errors.New("erro ao gerar token de acesso")
 	}

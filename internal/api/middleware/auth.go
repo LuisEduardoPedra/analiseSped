@@ -26,6 +26,7 @@ func AuthMiddleware(jwtSecret []byte) gin.HandlerFunc {
 		}
 
 		tokenString := parts[1]
+		jwtSecret := []byte(os.Getenv("JWT_SECRET"))
 		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, fmt.Errorf("método de assinatura inesperado: %v", token.Header["alg"])

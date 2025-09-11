@@ -32,11 +32,13 @@ func initFirestoreClient(ctx context.Context) *firestore.Client {
 func loadEnv() {
 	file, err := os.Open(".env")
 	if err != nil {
+
 		if os.IsNotExist(err) {
 			log.Print("Arquivo .env não encontrado, prosseguindo com variáveis de ambiente existentes")
 		} else {
 			log.Printf("Erro ao carregar .env: %v", err)
 		}
+
 		return
 	}
 	defer file.Close()
@@ -53,6 +55,7 @@ func loadEnv() {
 		}
 		key := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
+
 		if _, exists := os.LookupEnv(key); !exists {
 			os.Setenv(key, value)
 		}
@@ -67,8 +70,8 @@ func loadEnv() {
 func main() {
 	loadEnv()
 
-	jwtSecret := os.Getenv("JWT_SECRET")
-	if jwtSecret == "" {
+	if os.Getenv("JWT_SECRET") == "" {
+
 		log.Fatal("FATAL: Variável de ambiente JWT_SECRET não está configurada.")
 	}
 	jwtSecretBytes := []byte(jwtSecret)
