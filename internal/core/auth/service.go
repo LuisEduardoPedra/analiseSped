@@ -14,19 +14,22 @@ import (
 	"google.golang.org/api/iterator"
 )
 
-// A chave secreta agora é lida de uma variável de ambiente.
-var jwtSecret = []byte(os.Getenv("JWT_SECRET"))
-
 type Service interface {
 	Login(ctx context.Context, username, password string) (string, error)
 }
 
 type service struct {
-	db *firestore.Client
+	db        *firestore.Client
+	jwtSecret []byte
 }
 
-func NewService(db *firestore.Client) Service {
-	return &service{db: db}
+func NewService(db *firestore.Client, jwtSecret []byte) Service {
+	if len(jwtSecret) == 0 {
+		if env := os.Getenv("JWT_SECRET"); env != "" {
+			jwtSecret = []byte(env)
+		}
+	}
+	return &service{db: db, jwtSecret: jwtSecret}
 }
 
 // User representa a estrutura de um usuário no Firestore.
@@ -68,7 +71,7 @@ func (s *service) Login(ctx context.Context, username, password string) (string,
 		"exp":      time.Now().Add(time.Hour * 24).Unix(), // Token expira em 24 horas
 	})
 
-	tokenString, err := claims.SignedString(jwtSecret)
+	tokenString, err := claims.SignedString(s.jwtSecret)
 	if err != nil {
 		return "", errors.New("erro ao gerar token de acesso")
 	}
