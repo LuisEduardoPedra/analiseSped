@@ -4,18 +4,14 @@ package middleware
 import (
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// A chave secreta também é lida da variável de ambiente aqui.
-var jwtSecret = []byte(os.Getenv("JWT_SECRET"))
-
 // AuthMiddleware verifica se o token JWT é válido.
-func AuthMiddleware() gin.HandlerFunc {
+func AuthMiddleware(jwtSecret []byte) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
