@@ -23,6 +23,13 @@ type service struct {
 }
 
 func NewService(db *firestore.Client, jwtSecret []byte) Service {
+
+	if len(jwtSecret) == 0 {
+		if env := os.Getenv("JWT_SECRET"); env != "" {
+			jwtSecret = []byte(env)
+		}
+	}
+
 	return &service{db: db, jwtSecret: jwtSecret}
 }
 
@@ -65,8 +72,9 @@ func (s *service) Login(ctx context.Context, username, password string) (string,
 		"exp":      time.Now().Add(time.Hour * 24).Unix(), // Token expira em 24 horas
 	})
 
-	jwtSecret := []byte(os.Getenv("JWT_SECRET"))
-	tokenString, err := claims.SignedString(jwtSecret)
+
+	tokenString, err := claims.SignedString(s.jwtSecret)
+
 	if err != nil {
 		return "", errors.New("erro ao gerar token de acesso")
 	}
