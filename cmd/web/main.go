@@ -32,7 +32,13 @@ func initFirestoreClient(ctx context.Context) *firestore.Client {
 func loadEnv() {
 	file, err := os.Open(".env")
 	if err != nil {
-		log.Printf("Erro ao carregar .env: %v", err)
+
+		if os.IsNotExist(err) {
+			log.Print("Arquivo .env não encontrado, prosseguindo com variáveis de ambiente existentes")
+		} else {
+			log.Printf("Erro ao carregar .env: %v", err)
+		}
+
 		return
 	}
 	defer file.Close()
@@ -49,10 +55,15 @@ func loadEnv() {
 		}
 		key := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
-		os.Setenv(key, value)
+
+		if _, exists := os.LookupEnv(key); !exists {
+			os.Setenv(key, value)
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		log.Printf("Erro ao ler .env: %v", err)
+	} else {
+		log.Print("Variáveis de ambiente carregadas de .env")
 	}
 }
 
@@ -60,8 +71,10 @@ func main() {
 	loadEnv()
 
 	if os.Getenv("JWT_SECRET") == "" {
+
 		log.Fatal("FATAL: Variável de ambiente JWT_SECRET não está configurada.")
 	}
+	jwtSecretBytes := []byte(jwtSecret)
 
 	responses.InitLogger()
 	ctx := context.Background()
@@ -69,7 +82,7 @@ func main() {
 	defer firestoreClient.Close()
 
 	analysisService := analysis.NewService()
-	authService := auth.NewService(firestoreClient)
+	authService := auth.NewService(firestoreClient, jwtSecretBytes)
 	converterService := converter.NewService()
 
 	analysisHandler := handlers.NewAnalysisHandler(analysisService)
@@ -103,7 +116,7 @@ func main() {
 		apiV1.POST("/login", authHandler.Login)
 
 		protected := apiV1.Group("/")
-		protected.Use(middleware.AuthMiddleware())
+		protected.Use(middleware.AuthMiddleware(jwtSecretBytes))
 		{
 			// Rotas de Análise
 			protected.POST("/analyze/icms", middleware.PermissionMiddleware("analise-icms"), analysisHandler.HandleAnalysisIcms)

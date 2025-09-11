@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"log"
-	"os"
 	"time"
 
 	"cloud.google.com/go/firestore"
@@ -19,11 +18,12 @@ type Service interface {
 }
 
 type service struct {
-	db *firestore.Client
+	db        *firestore.Client
+	jwtSecret []byte
 }
 
-func NewService(db *firestore.Client) Service {
-	return &service{db: db}
+func NewService(db *firestore.Client, jwtSecret []byte) Service {
+	return &service{db: db, jwtSecret: jwtSecret}
 }
 
 // User representa a estrutura de um usuário no Firestore.

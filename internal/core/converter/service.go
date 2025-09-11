@@ -1103,18 +1103,38 @@ func (svc *service) findNFInRow(row []string) (string, bool) {
 	return "", false
 }
 
+// loadAtoliniData encapsula a lógica comum de leitura do plano de contas e do
+// arquivo Excel de lançamentos. O carregador de contas é passado como função
+// para permitir reutilização tanto em pagamentos quanto em recebimentos.
+func loadAtoliniData[T1 any, T2 any](
+	svc *service,
+	excelFile io.Reader,
+	contasFile io.Reader,
+	contasLoader func(io.Reader) (T1, T2, error),
+) (T1, T2, [][]string, error) {
+	var zeroT1 T1
+	var zeroT2 T2
+
+	contasMap, descricaoIndex, err := contasLoader(contasFile)
+	if err != nil {
+		return zeroT1, zeroT2, nil, fmt.Errorf("erro ao carregar arquivo de contas: %w", err)
+	}
+
+	rows, err := svc.loadGenericExcel(excelFile)
+	if err != nil {
+		return zeroT1, zeroT2, nil, fmt.Errorf("erro ao carregar arquivo de lançamentos: %w", err)
+	}
+
+	return contasMap, descricaoIndex, rows, nil
+}
+
 // ---------------------- ATOLINI - PAGAMENTOS (processamento) ----------------------
 
 // Ajustado para usar lerPlanoContasAtolini (mapa detalhado) e aplicar filtros: debitPrefixes / creditPrefixes.
 func (svc *service) ProcessAtoliniPagamentos(excelFile io.Reader, contasFile io.Reader, debitPrefixes []string, creditPrefixes []string) ([]byte, error) {
-	contasMap, descricaoIndex, err := svc.lerPlanoContasAtolini(contasFile)
+	contasMap, descricaoIndex, lancamentos, err := loadAtoliniData(svc, excelFile, contasFile, svc.lerPlanoContasAtolini)
 	if err != nil {
-		return nil, fmt.Errorf("erro ao carregar arquivo de contas: %w", err)
-	}
-
-	lancamentos, err := svc.loadGenericExcel(excelFile)
-	if err != nil {
-		return nil, fmt.Errorf("erro ao carregar arquivo de lançamentos: %w", err)
+		return nil, err
 	}
 
 	var finalRows []domain.AtoliniPagamentosOutputRow
@@ -1619,14 +1639,9 @@ func findLastPortadorBefore(sheet [][]string, idx int, lookback int) (string, bo
 }
 
 func (svc *service) ProcessAtoliniRecebimentos(excelFile io.Reader, contasFile io.Reader, debitPrefixes []string, creditPrefixes []string) ([]byte, error) {
-	descricaoIndex, contasMap, err := svc.lerContasRecebimentos(contasFile)
+	descricaoIndex, contasMap, rows, err := loadAtoliniData(svc, excelFile, contasFile, svc.lerContasRecebimentos)
 	if err != nil {
-		return nil, fmt.Errorf("erro ao carregar arquivo de contas: %w", err)
-	}
-
-	rows, err := svc.loadGenericExcel(excelFile)
-	if err != nil {
-		return nil, fmt.Errorf("erro ao carregar arquivo de lançamentos: %w", err)
+		return nil, err
 	}
 
 	var finalRows []domain.AtoliniRecebimentosOutputRow
