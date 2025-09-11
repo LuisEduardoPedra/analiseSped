@@ -47,7 +47,17 @@ func main() {
 
 	router := gin.Default()
 	router.Use(func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "https://analise-sped-frontend.vercel.app")
+		allowedOrigins := map[string]bool{
+			"https://analise-sped-frontend.vercel.app": true,
+			"https://www.activeat.com.br":              true,
+			"https://activeat.com.br":                  true,
+		}
+
+		origin := c.Request.Header.Get("Origin")
+		if allowedOrigins[origin] {
+			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+		}
+
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization")
 		if c.Request.Method == "OPTIONS" {
