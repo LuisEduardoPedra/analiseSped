@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/LuisEduardoPedra/analiseSped/internal/domain"
 	"github.com/schollz/closestmatch"
@@ -59,24 +60,46 @@ func sanitizeForCSV(s string) string {
 	if s == "" {
 		return ""
 	}
-	// trim inicial
-	s = strings.TrimSpace(s)
-	// map runes: remove \r \n \t e substitui outros controles (<32) por espaço
-	var b []rune
-	for _, r := range s {
+
+	start := 0
+	end := len(s)
+
+	for start < end {
+		r, size := utf8.DecodeRuneInString(s[start:end])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		start += size
+	}
+	for end > start {
+		r, size := utf8.DecodeLastRuneInString(s[start:end])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		end -= size
+	}
+	if start >= end {
+		return ""
+	}
+
+	var b strings.Builder
+	b.Grow(end - start)
+
+	for i := start; i < end; {
+		r, size := utf8.DecodeRuneInString(s[i:end])
+		i += size
+
 		if r == '\r' || r == '\n' || r == '\t' {
-			// pular
 			continue
 		}
 		if r < 32 {
-			// substituir por espaço para manter separação
-			b = append(b, ' ')
+			b.WriteByte(' ')
 			continue
 		}
-		b = append(b, r)
+		b.WriteRune(r)
 	}
-	res := strings.TrimSpace(string(b))
-	return res
+
+	return b.String()
 }
 
 // parseBRLNumber: heurística robusta para entradas brasileiras/anglo
@@ -1141,24 +1164,85 @@ func (svc *service) ProcessAtoliniPagamentos(
 	debitKeySuffix := strings.Join(debitPrefixes, ",")
 	creditKeySuffix := strings.Join(creditPrefixes, ",")
 
-	normalizeKey := func(desc string, suffix string) string {
-		// normalização leve e barata suficiente para chave de cache
-		d := strings.ToUpper(desc)
+	buildCacheKey := func(upperDesc string, suffix string) string {
 		if suffix == "" {
-			return d
+			return upperDesc
 		}
-		return d + "|" + suffix
+		var b strings.Builder
+		b.Grow(len(upperDesc) + 1 + len(suffix))
+		b.WriteString(upperDesc)
+		b.WriteByte('|')
+		b.WriteString(suffix)
+		return b.String()
 	}
 
 	// ---------- helpers leves ----------
-	normLower := func(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+	var (
+		trimCache  []string
+		lowerCache []string
+		upperCache []string
+		trimGen    []uint64
+		lowerGen   []uint64
+		upperGen   []uint64
+		rowGen     uint64
+	)
+
+	ensureRowCapacity := func(size int) {
+		if len(trimCache) >= size {
+			return
+		}
+		trimCache = make([]string, size)
+		lowerCache = make([]string, size)
+		upperCache = make([]string, size)
+		trimGen = make([]uint64, size)
+		lowerGen = make([]uint64, size)
+		upperGen = make([]uint64, size)
+	}
+
+	advanceRow := func(size int) {
+		ensureRowCapacity(size)
+		rowGen++
+	}
+
+	trimmedCell := func(row []string, idx int) string {
+		if idx < 0 || idx >= len(row) {
+			return ""
+		}
+		if trimGen[idx] != rowGen {
+			trimCache[idx] = strings.TrimSpace(row[idx])
+			trimGen[idx] = rowGen
+		}
+		return trimCache[idx]
+	}
+
+	lowerCell := func(row []string, idx int) string {
+		if idx < 0 || idx >= len(row) {
+			return ""
+		}
+		if lowerGen[idx] != rowGen {
+			lowerCache[idx] = strings.ToLower(trimmedCell(row, idx))
+			lowerGen[idx] = rowGen
+		}
+		return lowerCache[idx]
+	}
+
+	upperCell := func(row []string, idx int) string {
+		if idx < 0 || idx >= len(row) {
+			return ""
+		}
+		if upperGen[idx] != rowGen {
+			upperCache[idx] = strings.ToUpper(trimmedCell(row, idx))
+			upperGen[idx] = rowGen
+		}
+		return upperCache[idx]
+	}
 
 	rowHasPrefixN := func(row []string, n int, prefixes ...string) bool {
 		if n > len(row) {
 			n = len(row)
 		}
 		for i := 0; i < n; i++ {
-			cell := normLower(row[i])
+			cell := lowerCell(row, i)
 			for _, p := range prefixes {
 				if strings.HasPrefix(cell, p) {
 					return true
@@ -1176,7 +1260,7 @@ func (svc *service) ProcessAtoliniPagamentos(
 			maxScan = len(row)
 		}
 		for i := 0; i < maxScan; i++ {
-			if strings.Contains(normLower(row[i]), "data de pag") {
+			if strings.Contains(lowerCell(row, i), "data de pag") {
 				labelCol = i
 				break
 			}
@@ -1184,36 +1268,41 @@ func (svc *service) ProcessAtoliniPagamentos(
 		if labelCol == -1 {
 			return false
 		}
-		for _, ci := range []int{9, labelCol + 1, labelCol + 2} {
-			if d, ok := svc.parseDateDayFirst(getCell(row, ci)); ok {
+		for _, ci := range [...]int{9, labelCol + 1, labelCol + 2} {
+			if d, ok := svc.parseDateDayFirst(trimmedCell(row, ci)); ok {
+				blockDate = d
 				blockDateSanitized = sanitizeForCSV(d)
 				return true
 			}
 		}
 		if d2, ok2 := svc.findDateInRow(row); ok2 {
+			blockDate = d2
 			blockDateSanitized = sanitizeForCSV(d2)
 			return true
 		}
 		return false
 	}
 
-	isBankish := func(s string) bool {
-		s = strings.ToUpper(strings.TrimSpace(s))
-		if s == "" {
+	bankHints := [...]string{"SICRED", "BANCO", "BRADESCO", "ITAU", "SANTAND", "CAIXA", "BB", "CAIXA GERAL"}
+
+	isBankishUpper := func(upper string) bool {
+		if upper == "" {
 			return false
 		}
-		for _, h := range []string{"SICRED", "BANCO", "BRADESCO", "ITAU", "SANTAND", "CAIXA", "BB", "CAIXA GERAL"} {
-			if strings.Contains(s, h) {
+		for _, h := range bankHints {
+			if strings.Contains(upper, h) {
 				return true
 			}
 		}
 		return false
 	}
 
+	valueColumns := [...]int{8, 10, 11, 12, 9}
+
 	// Valor: prioridade coluna I(8); depois vizinhas e J(9) como último recurso.
 	pickValor := func(row []string) (float64, bool) {
-		for _, ci := range []int{8, 10, 11, 12, 9} {
-			v := getCell(row, ci)
+		for _, ci := range valueColumns {
+			v := trimmedCell(row, ci)
 			if v == "" || v == "0,00" {
 				continue
 			}
@@ -1224,22 +1313,22 @@ func (svc *service) ProcessAtoliniPagamentos(
 		return 0, false
 	}
 
-	pickBanco := func(row []string) string {
-		if isBankish(getCell(row, 19)) {
-			return getCell(row, 19)
+	pickBanco := func(row []string) (string, string) {
+		if upper := upperCell(row, 19); isBankishUpper(upper) {
+			return trimmedCell(row, 19), upper
 		} // T
-		for _, c := range []int{18, 20, 21} { // S, U, V
-			if isBankish(getCell(row, c)) {
-				return getCell(row, c)
+		for _, c := range [...]int{18, 20, 21} { // S, U, V
+			if upper := upperCell(row, c); isBankishUpper(upper) {
+				return trimmedCell(row, c), upper
 			}
 		}
-		return ""
+		return "", ""
 	}
 
 	extractDoc := func(row []string) string {
 		// célula com 3+ dígitos (barato e suficiente p/ fallback)
-		for _, c := range row {
-			c = strings.TrimSpace(c)
+		for i := range row {
+			c := trimmedCell(row, i)
 			if len(c) < 3 {
 				continue
 			}
@@ -1258,6 +1347,7 @@ func (svc *service) ProcessAtoliniPagamentos(
 
 	// ----------------------- único loop O(n) -----------------------
 	for _, row := range rows {
+		advanceRow(len(row))
 		// 1) data do bloco (cabeçalho)
 		if updateBlockDateIfHeader(row) {
 			continue
@@ -1283,9 +1373,9 @@ func (svc *service) ProcessAtoliniPagamentos(
 		}
 
 		// 4) descrição (B) + histórico (B + " NF " + D / doc)
-		descDeb := getCell(row, 1) // B
+		descDeb := trimmedCell(row, 1) // B
 		hist := descDeb
-		if dcol := getCell(row, 3); dcol != "" { // D
+		if dcol := trimmedCell(row, 3); dcol != "" { // D
 			if descDeb != "" {
 				hist = descDeb + " NF " + dcol
 			} else {
@@ -1296,29 +1386,28 @@ func (svc *service) ProcessAtoliniPagamentos(
 		}
 
 		// 5) banco (crédito)
-		descCredRaw := pickBanco(row)
-		descCred := descCredRaw
+		descCred, descCredUpper := pickBanco(row)
 
 		// 6) matching com CACHE
 		var debID, credID string
 
 		if descDeb != "" {
-			k := normalizeKey(descDeb, debitKeySuffix)
-			if id, ok := debCache[k]; ok {
+			debKey := buildCacheKey(upperCell(row, 1), debitKeySuffix)
+			if id, ok := debCache[debKey]; ok {
 				debID = id
 			} else {
 				debID = svc.buscarContaAtolini(descDeb, contasMap, descricaoIndex, debitPrefixes)
-				debCache[k] = debID
+				debCache[debKey] = debID
 			}
 		}
 
 		if descCred != "" {
-			k := normalizeKey(descCred, creditKeySuffix)
-			if id, ok := credCache[k]; ok {
+			credKey := buildCacheKey(descCredUpper, creditKeySuffix)
+			if id, ok := credCache[credKey]; ok {
 				credID = id
 			} else {
 				credID = svc.buscarContaAtolini(descCred, contasMap, descricaoIndex, creditPrefixes)
-				credCache[k] = credID
+				credCache[credKey] = credID
 			}
 		}
 
@@ -1351,13 +1440,13 @@ func (svc *service) gerarCSVAtoliniPagamentos(rows []domain.AtoliniPagamentosOut
 
 	for _, row := range rows {
 		record := []string{
-			sanitizeForCSV(row.Data),
-			sanitizeForCSV(row.Debito),
-			sanitizeForCSV(row.DescricaoConta),
-			sanitizeForCSV(row.Credito),
-			sanitizeForCSV(row.DescricaoCredito),
-			sanitizeForCSV(row.Valor),
-			sanitizeForCSV(row.Historico),
+			row.Data,
+			row.Debito,
+			row.DescricaoConta,
+			row.Credito,
+			row.DescricaoCredito,
+			row.Valor,
+			row.Historico,
 		}
 		if err := writer.Write(record); err != nil {
 			return nil, err
