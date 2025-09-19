@@ -1283,7 +1283,7 @@ func (svc *service) ProcessAtoliniPagamentos(
 		return false
 	}
 
-	bankHints := [...]string{"SICRED", "BANCO", "BRADESCO", "ITAU", "SANTAND", "CAIXA", "BB", "CAIXA GERAL"}
+	bankHints := [...]string{"SICRED", "BANCO", "BRADESCO", "ITAU", "SANTAND", "CAIXA", "BB", "CAIXA GERAL", "REBATE", "BAIXA DEVOL"}
 
 	isBankishUpper := func(upper string) bool {
 		if upper == "" {
