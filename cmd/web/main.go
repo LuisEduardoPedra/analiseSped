@@ -2,9 +2,11 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"log"
 	"os"
+	"strings"
 
 	"cloud.google.com/go/firestore"
 	"github.com/LuisEduardoPedra/analiseSped/internal/api/handlers"
@@ -27,8 +29,50 @@ func initFirestoreClient(ctx context.Context) *firestore.Client {
 	return client
 }
 
+func loadEnv() {
+	file, err := os.Open(".env")
+	if err != nil {
+
+		if os.IsNotExist(err) {
+			log.Print("Arquivo .env não encontrado, prosseguindo com variáveis de ambiente existentes")
+		} else {
+			log.Printf("Erro ao carregar .env: %v", err)
+		}
+
+		return
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		if _, exists := os.LookupEnv(key); !exists {
+			os.Setenv(key, value)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		log.Printf("Erro ao ler .env: %v", err)
+	} else {
+		log.Print("Variáveis de ambiente carregadas de .env")
+	}
+}
+
 func main() {
-	if os.Getenv("JWT_SECRET") == "" {
+	loadEnv()
+
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+
 		log.Fatal("FATAL: Variável de ambiente JWT_SECRET não está configurada.")
 	}
 
@@ -38,26 +82,44 @@ func main() {
 	defer firestoreClient.Close()
 
 	analysisService := analysis.NewService()
-	authService := auth.NewService(firestoreClient)
+
+	authService := auth.NewService(firestoreClient, []byte(jwtSecret))
+
 	converterService := converter.NewService()
 
 	analysisHandler := handlers.NewAnalysisHandler(analysisService)
 	authHandler := handlers.NewAuthHandler(authService)
 	converterHandler := handlers.NewConverterHandler(converterService)
 
+	allowedOriginsEnv := os.Getenv("ALLOWED_ORIGINS")
+	if allowedOriginsEnv == "" {
+		allowedOriginsEnv = "https://analise-sped-frontend.vercel.app"
+	}
+	allowedOrigins := strings.Split(allowedOriginsEnv, ",")
+
 	router := gin.Default()
 	router.Use(func(c *gin.Context) {
-		allowedOrigins := map[string]bool{
-			"https://analise-sped-frontend.vercel.app": true,
-			"https://www.activeat.com.br":              true,
-			"https://activeat.com.br":                  true,
+		origin := c.Request.Header.Get("Origin")
+
+		// Fallback de compatibilidade: se o ENV vier vazio, garanta os antigos também
+		legacyAllowed := []string{
+			"https://analise-sped-frontend.vercel.app",
+			"https://www.activeat.com.br",
+			"https://activeat.com.br",
 		}
 
-		origin := c.Request.Header.Get("Origin")
-		if allowedOrigins[origin] {
+		// allowedOrigins e allowedOriginsEnv já foram definidos acima:
+		//   allowedOriginsEnv := os.Getenv("ALLOWED_ORIGINS")
+		//   if allowedOriginsEnv == "" { allowedOriginsEnv = "https://analise-sped-frontend.vercel.app" }
+		//   allowedOrigins := strings.Split(allowedOriginsEnv, ",")
+
+		if origin != "" && (allowedOriginsEnv == "*" ||
+			containsOrigin(allowedOrigins, origin) ||
+			containsOrigin(legacyAllowed, origin)) {
+
 			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
 		}
-
+		c.Writer.Header().Set("Vary", "Origin")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization")
 		if c.Request.Method == "OPTIONS" {
@@ -72,7 +134,9 @@ func main() {
 		apiV1.POST("/login", authHandler.Login)
 
 		protected := apiV1.Group("/")
-		protected.Use(middleware.AuthMiddleware())
+
+		protected.Use(middleware.AuthMiddleware([]byte(jwtSecret)))
+
 		{
 			// Rotas de Análise
 			protected.POST("/analyze/icms", middleware.PermissionMiddleware("analise-icms"), analysisHandler.HandleAnalysisIcms)
@@ -100,4 +164,13 @@ func main() {
 	if err := router.Run(":" + port); err != nil {
 		log.Fatal("Falha ao iniciar o servidor: ", err)
 	}
+}
+
+func containsOrigin(origins []string, origin string) bool {
+	for _, o := range origins {
+		if strings.TrimSpace(o) == origin {
+			return true
+		}
+	}
+	return false
 }

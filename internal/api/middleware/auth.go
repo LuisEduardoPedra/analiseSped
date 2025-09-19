@@ -11,11 +11,9 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// A chave secreta também é lida da variável de ambiente aqui.
-var jwtSecret = []byte(os.Getenv("JWT_SECRET"))
-
 // AuthMiddleware verifica se o token JWT é válido.
-func AuthMiddleware() gin.HandlerFunc {
+func AuthMiddleware(jwtSecret []byte) gin.HandlerFunc {
+
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
@@ -30,6 +28,7 @@ func AuthMiddleware() gin.HandlerFunc {
 		}
 
 		tokenString := parts[1]
+		jwtSecret := []byte(os.Getenv("JWT_SECRET"))
 		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, fmt.Errorf("método de assinatura inesperado: %v", token.Header["alg"])
