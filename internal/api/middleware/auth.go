@@ -4,6 +4,7 @@ package middleware
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -12,12 +13,6 @@ import (
 
 // AuthMiddleware verifica se o token JWT é válido.
 func AuthMiddleware(jwtSecret []byte) gin.HandlerFunc {
-
-	if len(jwtSecret) == 0 {
-		if env := os.Getenv("JWT_SECRET"); env != "" {
-			jwtSecret = []byte(env)
-		}
-	}
 
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")

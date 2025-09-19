@@ -1089,20 +1089,6 @@ func (svc *service) findDateInPreviousRows(sheet [][]string, idx int, lookback i
 	return "", false
 }
 
-var nfRegex = regexp.MustCompile(`\d{4,7}\s*-\s*\d+|\d{4,7}`)
-
-func (svc *service) findNFInRow(row []string) (string, bool) {
-	for _, c := range row {
-		if c == "" {
-			continue
-		}
-		if m := nfRegex.FindString(c); m != "" {
-			return strings.TrimSpace(m), true
-		}
-	}
-	return "", false
-}
-
 // loadAtoliniData encapsula a lógica comum de leitura do plano de contas e do
 // arquivo Excel de lançamentos. O carregador de contas é passado como função
 // para permitir reutilização tanto em pagamentos quanto em recebimentos.
@@ -1131,95 +1117,219 @@ func loadAtoliniData[T1 any, T2 any](
 // ---------------------- ATOLINI - PAGAMENTOS (processamento) ----------------------
 
 // Ajustado para usar lerPlanoContasAtolini (mapa detalhado) e aplicar filtros: debitPrefixes / creditPrefixes.
-func (svc *service) ProcessAtoliniPagamentos(excelFile io.Reader, contasFile io.Reader, debitPrefixes []string, creditPrefixes []string) ([]byte, error) {
-	contasMap, descricaoIndex, lancamentos, err := loadAtoliniData(svc, excelFile, contasFile, svc.lerPlanoContasAtolini)
+func (svc *service) ProcessAtoliniPagamentos(
+	excelFile io.Reader,
+	contasFile io.Reader,
+	debitPrefixes []string,
+	creditPrefixes []string,
+) ([]byte, error) {
+	contasMap, descricaoIndex, rows, err := loadAtoliniData(svc, excelFile, contasFile, svc.lerPlanoContasAtolini)
 	if err != nil {
 		return nil, err
 	}
 
-	var finalRows []domain.AtoliniPagamentosOutputRow
-	var dataAtual string
+	var out []domain.AtoliniPagamentosOutputRow
+	var blockDate string
+	inHistorico := false
 
-	for i, row := range lancamentos {
-		// A data válida está na coluna C (índice 2).
-		if d, ok := svc.findDateInRow([]string{getCell(row, 2)}); ok {
-			dataAtual = d
+	// ---------- caches p/ evitar fuzzy match repetido ----------
+	// chave = UPPER(desc) + "|" + strings.Join(prefixos, ",")
+	debCache := make(map[string]string, 256)
+	credCache := make(map[string]string, 64)
+
+	normalizeKey := func(desc string, prefixes []string) string {
+		// normalização leve e barata suficiente para chave de cache
+		d := strings.ToUpper(strings.TrimSpace(desc))
+		return d + "|" + strings.Join(prefixes, ",")
+	}
+
+	// ---------- helpers leves ----------
+	normLower := func(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
+	rowHasPrefixN := func(row []string, n int, prefixes ...string) bool {
+		if n > len(row) {
+			n = len(row)
 		}
+		for i := 0; i < n; i++ {
+			cell := normLower(row[i])
+			for _, p := range prefixes {
+				if strings.HasPrefix(cell, p) {
+					return true
+				}
+			}
+		}
+		return false
+	}
 
-		c0 := getCell(row, 0)
-		c0Lower := strings.ToLower(c0)
-		if c0Lower != "" && strings.Contains(c0Lower, "data de pagamento") {
-			// linha apenas informativa; data já capturada acima
+	// detecta a linha "Data de pag..." e fixa blockDate (preferindo J; senão à direita do rótulo)
+	updateBlockDateIfHeader := func(row []string) bool {
+		labelCol := -1
+		maxScan := 6
+		if maxScan > len(row) {
+			maxScan = len(row)
+		}
+		for i := 0; i < maxScan; i++ {
+			if strings.Contains(normLower(row[i]), "data de pag") {
+				labelCol = i
+				break
+			}
+		}
+		if labelCol == -1 {
+			return false
+		}
+		for _, ci := range []int{9, labelCol + 1, labelCol + 2} {
+			if d, ok := svc.parseDateDayFirst(getCell(row, ci)); ok {
+				blockDate = d
+				return true
+			}
+		}
+		if d2, ok2 := svc.findDateInRow(row); ok2 {
+			blockDate = d2
+			return true
+		}
+		return false
+	}
+
+	isBankish := func(s string) bool {
+		s = strings.ToUpper(strings.TrimSpace(s))
+		if s == "" {
+			return false
+		}
+		for _, h := range []string{"SICRED", "BANCO", "BRADESCO", "ITAU", "SANTAND", "CAIXA", "BB", "CAIXA GERAL"} {
+			if strings.Contains(s, h) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Valor: prioridade coluna I(8); depois vizinhas e J(9) como último recurso.
+	pickValorStr := func(row []string) string {
+		for _, ci := range []int{8, 10, 11, 12, 9} {
+			v := strings.TrimSpace(getCell(row, ci))
+			if v == "" || v == "0,00" {
+				continue
+			}
+			if _, err := svc.parseBRLNumber(v); err == nil {
+				return v
+			}
+		}
+		return ""
+	}
+
+	pickBanco := func(row []string) string {
+		if isBankish(getCell(row, 19)) {
+			return getCell(row, 19)
+		} // T
+		for _, c := range []int{18, 20, 21} { // S, U, V
+			if isBankish(getCell(row, c)) {
+				return getCell(row, c)
+			}
+		}
+		return ""
+	}
+
+	extractDoc := func(row []string) string {
+		// célula com 3+ dígitos (barato e suficiente p/ fallback)
+		for _, c := range row {
+			c = strings.TrimSpace(c)
+			if len(c) < 3 {
+				continue
+			}
+			digitCount := 0
+			for _, r := range c {
+				if r >= '0' && r <= '9' {
+					digitCount++
+					if digitCount >= 3 {
+						return c
+					}
+				}
+			}
+		}
+		return ""
+	}
+
+	// ----------------------- único loop O(n) -----------------------
+	for _, row := range rows {
+		// 1) data do bloco (cabeçalho)
+		if updateBlockDateIfHeader(row) {
 			continue
 		}
 
-		// identificação de linha de lançamento baseada na coluna 0 (número sequencial) e existência de col 19 (estrutura original)
-		if c0 != "" {
-			if _, err := strconv.Atoi(strings.TrimSpace(c0)); err == nil && getCell(row, 19) != "" {
-				// se data atual vazio, tentar buscar em linhas anteriores
-				if dataAtual == "" {
-					if d, ok := svc.findDateInPreviousRows(lancamentos, i, 20); ok {
-						dataAtual = d
-					}
-				}
+		// 2) começo/fim do bloco "Histórico:"
+		if rowHasPrefixN(row, 3, "histórico", "historico") {
+			inHistorico = true
+			continue
+		}
+		if rowHasPrefixN(row, 3, "total do histórico", "total do historico", "total da data") {
+			inHistorico = false
+			continue
+		}
+		if !inHistorico || blockDate == "" {
+			continue
+		}
 
-				descSegColuna := getCell(row, 1)
-				historico := getCell(row, 3)
+		// 3) valor rápido (I -> vizinhas -> J)
+		valStr := pickValorStr(row)
+		if valStr == "" {
+			continue
+		}
+		val, _ := svc.parseBRLNumber(valStr)
 
-				if historico == "" {
-					found := ""
-					for j := 2; j <= 6 && j < len(row); j++ {
-						if m, ok := svc.findNFInRow([]string{getCell(row, j)}); ok {
-							found = m
-							break
-						}
-					}
-					if found == "" {
-						for j := i - 1; j >= 0 && j >= i-10; j-- {
-							if m, ok := svc.findNFInRow(lancamentos[j]); ok {
-								found = m
-								break
-							}
-						}
-					}
-					if found != "" {
-						historico = strings.TrimSpace(descSegColuna)
-						if historico != "" {
-							historico = historico + " NF " + found
-						} else {
-							historico = "NF " + found
-						}
-					}
-				}
+		// 4) descrição (B) + histórico (B + " NF " + D / doc)
+		descDebRaw := getCell(row, 1) // B
+		descDeb := strings.TrimSpace(descDebRaw)
+		hist := descDeb
+		if dcol := strings.TrimSpace(getCell(row, 3)); dcol != "" { // D
+			hist = descDeb + " NF " + dcol
+		} else if doc := strings.TrimSpace(extractDoc(row)); doc != "" && descDeb != "" {
+			hist = descDeb + " NF " + doc
+		}
 
-				valorStr := getCell(row, 9)
-				valor, _ := svc.parseBRLNumber(valorStr)
-				descColT := getCell(row, 19)
+		// 5) banco (crédito)
+		descCredRaw := pickBanco(row)
+		descCred := strings.TrimSpace(descCredRaw)
 
-				// usar buscarContaAtolini com filtro de classificação apropriado
-				debitoID := svc.buscarContaAtolini(descSegColuna, contasMap, descricaoIndex, debitPrefixes)
-				creditoID := svc.buscarContaAtolini(descColT, contasMap, descricaoIndex, creditPrefixes)
+		// 6) matching com CACHE
+		var debID, credID string
 
-				finalRows = append(finalRows, domain.AtoliniPagamentosOutputRow{
-					Data:             sanitizeForCSV(dataAtual),
-					Debito:           sanitizeForCSV(debitoID),
-					DescricaoConta:   sanitizeForCSV(descSegColuna),
-					Credito:          sanitizeForCSV(creditoID),
-					DescricaoCredito: sanitizeForCSV(descColT),
-					Valor:            sanitizeForCSV(svc.formatTwoDecimalsComma(valor)),
-					Historico:        sanitizeForCSV(historico),
-				})
+		if descDeb != "" {
+			k := normalizeKey(descDeb, debitPrefixes)
+			if id, ok := debCache[k]; ok {
+				debID = id
+			} else {
+				debID = svc.buscarContaAtolini(descDeb, contasMap, descricaoIndex, debitPrefixes)
+				debCache[k] = debID
 			}
 		}
+
+		if descCred != "" {
+			k := normalizeKey(descCred, creditPrefixes)
+			if id, ok := credCache[k]; ok {
+				credID = id
+			} else {
+				credID = svc.buscarContaAtolini(descCred, contasMap, descricaoIndex, creditPrefixes)
+				credCache[k] = credID
+			}
+		}
+
+		out = append(out, domain.AtoliniPagamentosOutputRow{
+			Data:             sanitizeForCSV(blockDate),
+			Debito:           sanitizeForCSV(debID),
+			DescricaoConta:   sanitizeForCSV(descDeb),
+			Credito:          sanitizeForCSV(credID),
+			DescricaoCredito: sanitizeForCSV(descCred),
+			Valor:            sanitizeForCSV(svc.formatTwoDecimalsComma(val)),
+			Historico:        sanitizeForCSV(hist),
+		})
 	}
 
-	return svc.gerarCSVAtoliniPagamentos(finalRows)
+	return svc.gerarCSVAtoliniPagamentos(out)
 }
 
 func (svc *service) gerarCSVAtoliniPagamentos(rows []domain.AtoliniPagamentosOutputRow) ([]byte, error) {
 	var buffer bytes.Buffer
-	encoder := charmap.Windows1252.NewEncoder()
-	writer := csv.NewWriter(transform.NewWriter(&buffer, encoder))
+	writer := csv.NewWriter(&buffer)
 	writer.Comma = ';'
 
 	header := []string{"Data", "Debito", "Descição conta", "Credito", "Descrição Crédito", "Valor", "histórico"}

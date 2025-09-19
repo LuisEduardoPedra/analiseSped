@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"os"
 	"time"
 
 	"cloud.google.com/go/firestore"
@@ -71,7 +72,6 @@ func (s *service) Login(ctx context.Context, username, password string) (string,
 		"roles":    user.Roles,                            // Adiciona as permissões ao token
 		"exp":      time.Now().Add(time.Hour * 24).Unix(), // Token expira em 24 horas
 	})
-
 
 	tokenString, err := claims.SignedString(s.jwtSecret)
 

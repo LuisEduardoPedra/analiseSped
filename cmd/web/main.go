@@ -33,7 +33,6 @@ func loadEnv() {
 	file, err := os.Open(".env")
 	if err != nil {
 
-
 		if os.IsNotExist(err) {
 			log.Print("Arquivo .env não encontrado, prosseguindo com variáveis de ambiente existentes")
 		} else {
@@ -71,13 +70,11 @@ func loadEnv() {
 func main() {
 	loadEnv()
 
-
 	jwtSecret := os.Getenv("JWT_SECRET")
 	if jwtSecret == "" {
 
 		log.Fatal("FATAL: Variável de ambiente JWT_SECRET não está configurada.")
 	}
-	jwtSecretBytes := []byte(jwtSecret)
 
 	responses.InitLogger()
 	ctx := context.Background()
