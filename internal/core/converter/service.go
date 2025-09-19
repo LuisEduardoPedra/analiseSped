@@ -1128,8 +1128,9 @@ func (svc *service) ProcessAtoliniPagamentos(
 		return nil, err
 	}
 
-	var out []domain.AtoliniPagamentosOutputRow
+	out := make([]domain.AtoliniPagamentosOutputRow, 0, len(rows))
 	var blockDate string
+	var blockDateSanitized string
 	inHistorico := false
 
 	// ---------- caches p/ evitar fuzzy match repetido ----------
@@ -1137,10 +1138,16 @@ func (svc *service) ProcessAtoliniPagamentos(
 	debCache := make(map[string]string, 256)
 	credCache := make(map[string]string, 64)
 
-	normalizeKey := func(desc string, prefixes []string) string {
+	debitKeySuffix := strings.Join(debitPrefixes, ",")
+	creditKeySuffix := strings.Join(creditPrefixes, ",")
+
+	normalizeKey := func(desc string, suffix string) string {
 		// normalização leve e barata suficiente para chave de cache
-		d := strings.ToUpper(strings.TrimSpace(desc))
-		return d + "|" + strings.Join(prefixes, ",")
+		d := strings.ToUpper(desc)
+		if suffix == "" {
+			return d
+		}
+		return d + "|" + suffix
 	}
 
 	// ---------- helpers leves ----------
@@ -1179,12 +1186,12 @@ func (svc *service) ProcessAtoliniPagamentos(
 		}
 		for _, ci := range []int{9, labelCol + 1, labelCol + 2} {
 			if d, ok := svc.parseDateDayFirst(getCell(row, ci)); ok {
-				blockDate = d
+				blockDateSanitized = sanitizeForCSV(d)
 				return true
 			}
 		}
 		if d2, ok2 := svc.findDateInRow(row); ok2 {
-			blockDate = d2
+			blockDateSanitized = sanitizeForCSV(d2)
 			return true
 		}
 		return false
@@ -1204,17 +1211,17 @@ func (svc *service) ProcessAtoliniPagamentos(
 	}
 
 	// Valor: prioridade coluna I(8); depois vizinhas e J(9) como último recurso.
-	pickValorStr := func(row []string) string {
+	pickValor := func(row []string) (float64, bool) {
 		for _, ci := range []int{8, 10, 11, 12, 9} {
-			v := strings.TrimSpace(getCell(row, ci))
+			v := getCell(row, ci)
 			if v == "" || v == "0,00" {
 				continue
 			}
-			if _, err := svc.parseBRLNumber(v); err == nil {
-				return v
+			if parsed, err := svc.parseBRLNumber(v); err == nil {
+				return parsed, true
 			}
 		}
-		return ""
+		return 0, false
 	}
 
 	pickBanco := func(row []string) string {
@@ -1270,31 +1277,33 @@ func (svc *service) ProcessAtoliniPagamentos(
 		}
 
 		// 3) valor rápido (I -> vizinhas -> J)
-		valStr := pickValorStr(row)
-		if valStr == "" {
+		val, ok := pickValor(row)
+		if !ok {
 			continue
 		}
-		val, _ := svc.parseBRLNumber(valStr)
 
 		// 4) descrição (B) + histórico (B + " NF " + D / doc)
-		descDebRaw := getCell(row, 1) // B
-		descDeb := strings.TrimSpace(descDebRaw)
+		descDeb := getCell(row, 1) // B
 		hist := descDeb
-		if dcol := strings.TrimSpace(getCell(row, 3)); dcol != "" { // D
-			hist = descDeb + " NF " + dcol
-		} else if doc := strings.TrimSpace(extractDoc(row)); doc != "" && descDeb != "" {
+		if dcol := getCell(row, 3); dcol != "" { // D
+			if descDeb != "" {
+				hist = descDeb + " NF " + dcol
+			} else {
+				hist = " NF " + dcol
+			}
+		} else if doc := extractDoc(row); doc != "" && descDeb != "" {
 			hist = descDeb + " NF " + doc
 		}
 
 		// 5) banco (crédito)
 		descCredRaw := pickBanco(row)
-		descCred := strings.TrimSpace(descCredRaw)
+		descCred := descCredRaw
 
 		// 6) matching com CACHE
 		var debID, credID string
 
 		if descDeb != "" {
-			k := normalizeKey(descDeb, debitPrefixes)
+			k := normalizeKey(descDeb, debitKeySuffix)
 			if id, ok := debCache[k]; ok {
 				debID = id
 			} else {
@@ -1304,7 +1313,7 @@ func (svc *service) ProcessAtoliniPagamentos(
 		}
 
 		if descCred != "" {
-			k := normalizeKey(descCred, creditPrefixes)
+			k := normalizeKey(descCred, creditKeySuffix)
 			if id, ok := credCache[k]; ok {
 				credID = id
 			} else {
@@ -1314,7 +1323,7 @@ func (svc *service) ProcessAtoliniPagamentos(
 		}
 
 		out = append(out, domain.AtoliniPagamentosOutputRow{
-			Data:             sanitizeForCSV(blockDate),
+			Data:             blockDateSanitized,
 			Debito:           sanitizeForCSV(debID),
 			DescricaoConta:   sanitizeForCSV(descDeb),
 			Credito:          sanitizeForCSV(credID),
