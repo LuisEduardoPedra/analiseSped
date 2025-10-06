@@ -950,6 +950,10 @@ func (svc *service) buscarContaAtolini(texto string, contasMap map[string][]accE
 		return "999999"
 	}
 	descNorm := svc.normalizeText(t)
+	if descNorm == "" {
+		return "999999"
+	}
+	altNorm := stripLeadingNumberPrefix(descNorm)
 
 	// helper: pick best entry from slice applying classPrefixes filter (prefers longest classif)
 	pickBest := func(entries []accEntry, prefixes []string) (accEntry, bool) {
@@ -980,12 +984,26 @@ func (svc *service) buscarContaAtolini(texto string, contasMap map[string][]accE
 		return candidates[0], true
 	}
 
-	// 1) exato
-	if entries, ok := contasMap[descNorm]; ok && len(entries) > 0 {
-		if be, ok2 := pickBest(entries, classPrefixes); ok2 {
-			return strings.TrimSpace(be.ID)
+	tryKey := func(key string) (string, bool) {
+		if key == "" {
+			return "", false
 		}
-		// se pickBest falhar por filtro, não usar candidatos sem classif correspondente
+		if entries, ok := contasMap[key]; ok && len(entries) > 0 {
+			if be, ok2 := pickBest(entries, classPrefixes); ok2 {
+				return strings.TrimSpace(be.ID), true
+			}
+		}
+		return "", false
+	}
+
+	// 1) exato
+	if code, ok := tryKey(descNorm); ok {
+		return code
+	}
+	if altNorm != descNorm {
+		if code, ok := tryKey(altNorm); ok {
+			return code
+		}
 	}
 
 	// 2) fuzzy: construir candidateKeys aplicando filtro por classPrefixes (se houver)
@@ -1014,12 +1032,16 @@ func (svc *service) buscarContaAtolini(texto string, contasMap map[string][]accE
 	}
 
 	if len(candidateKeys) > 0 {
-		cm := closestmatch.New(candidateKeys, []int{3, 4})
-		match := cm.Closest(descNorm)
-		if match != "" {
-			if entries, ok := contasMap[match]; ok && len(entries) > 0 {
-				if be, ok2 := pickBest(entries, classPrefixes); ok2 {
-					return strings.TrimSpace(be.ID)
+		cm := closestmatch.New(candidateKeys, []int{3, 4, 5})
+		if match := cm.Closest(descNorm); match != "" {
+			if code, ok := tryKey(match); ok {
+				return code
+			}
+		}
+		if altNorm != descNorm {
+			if matchAlt := cm.Closest(altNorm); matchAlt != "" {
+				if code, ok := tryKey(matchAlt); ok {
+					return code
 				}
 			}
 		}
@@ -1316,6 +1338,17 @@ func (svc *service) ProcessAtoliniPagamentos(
 		return 0, false
 	}
 
+	formatMoney := func(row []string, idx int) string {
+		raw := trimmedCell(row, idx)
+		if raw == "" {
+			return ""
+		}
+		if parsed, err := svc.parseBRLNumber(raw); err == nil {
+			return svc.formatTwoDecimalsComma(parsed)
+		}
+		return raw
+	}
+
 	pickBanco := func(row []string) (string, string) {
 		if upper := upperCell(row, 19); isBankishUpper(upper) {
 			return trimmedCell(row, 19), upper
@@ -1415,13 +1448,21 @@ func (svc *service) ProcessAtoliniPagamentos(
 		}
 
 		out = append(out, domain.AtoliniPagamentosOutputRow{
-			Data:             blockDateSanitized,
-			Debito:           sanitizeForCSV(debID),
-			DescricaoConta:   sanitizeForCSV(descDeb),
-			Credito:          sanitizeForCSV(credID),
-			DescricaoCredito: sanitizeForCSV(descCred),
-			Valor:            sanitizeForCSV(svc.formatTwoDecimalsComma(val)),
-			Historico:        sanitizeForCSV(hist),
+			Data:              blockDateSanitized,
+			Debito:            sanitizeForCSV(debID),
+			DescricaoConta:    sanitizeForCSV(descDeb),
+			Credito:           sanitizeForCSV(credID),
+			DescricaoCredito:  sanitizeForCSV(descCred),
+			Valor:             sanitizeForCSV(svc.formatTwoDecimalsComma(val)),
+			Historico:         sanitizeForCSV(hist),
+			ValorOriginal:     sanitizeForCSV(formatMoney(row, 7)),
+			ValorPago:         sanitizeForCSV(formatMoney(row, 8)),
+			ValorJuros:        sanitizeForCSV(formatMoney(row, 9)),
+			ValorMulta:        sanitizeForCSV(formatMoney(row, 11)),
+			ValorDesconto:     sanitizeForCSV(formatMoney(row, 12)),
+			ValorDespesas:     sanitizeForCSV(formatMoney(row, 13)),
+			VarCam:            sanitizeForCSV(formatMoney(row, 15)),
+			ValorLiqPagoBanco: sanitizeForCSV(formatMoney(row, 17)),
 		})
 	}
 
@@ -1433,7 +1474,8 @@ func (svc *service) gerarCSVAtoliniPagamentos(rows []domain.AtoliniPagamentosOut
 	writer := csv.NewWriter(&buffer)
 	writer.Comma = ';'
 
-	header := []string{"Data", "Debito", "Descição conta", "Credito", "Descrição Crédito", "Valor", "histórico"}
+	header := []string{"Data", "Debito", "Descição conta", "Credito", "Descrição Crédito", "Valor", "histórico", "Valor Original",
+		"Valor Juros", "Valor Multa", "Valor Desconto", "Valor Despesas", "Var Cam", "Valor Liq Pago Banco"}
 	for i := range header {
 		header[i] = sanitizeForCSV(header[i])
 	}
@@ -1450,6 +1492,14 @@ func (svc *service) gerarCSVAtoliniPagamentos(rows []domain.AtoliniPagamentosOut
 			row.DescricaoCredito,
 			row.Valor,
 			row.Historico,
+			row.ValorOriginal,
+			row.ValorPago,
+			row.ValorJuros,
+			row.ValorMulta,
+			row.ValorDesconto,
+			row.ValorDespesas,
+			row.VarCam,
+			row.ValorLiqPagoBanco,
 		}
 		if err := writer.Write(record); err != nil {
 			return nil, err
