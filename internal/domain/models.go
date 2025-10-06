@@ -194,13 +194,21 @@ type ContaAtolini struct {
 
 // AtoliniPagamentosOutputRow representa uma linha do CSV de saída para Atolini Pagamentos.
 type AtoliniPagamentosOutputRow struct {
-	Data             string
-	Debito           string
-	DescricaoConta   string
-	Credito          string
-	DescricaoCredito string
-	Valor            string
-	Historico        string
+	Data              string
+	Debito            string
+	DescricaoConta    string
+	Credito           string
+	DescricaoCredito  string
+	Valor             string
+	Historico         string
+	ValorOriginal     string
+	ValorPago         string
+	ValorJuros        string
+	ValorMulta        string
+	ValorDesconto     string
+	ValorDespesas     string
+	VarCam            string
+	ValorLiqPagoBanco string
 }
 
 // AtoliniRecebimentosOutputRow representa uma linha do CSV de saída para Atolini Recebimentos.

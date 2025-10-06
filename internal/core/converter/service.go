@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/LuisEduardoPedra/analiseSped/internal/domain"
 	"github.com/schollz/closestmatch"
@@ -59,24 +60,46 @@ func sanitizeForCSV(s string) string {
 	if s == "" {
 		return ""
 	}
-	// trim inicial
-	s = strings.TrimSpace(s)
-	// map runes: remove \r \n \t e substitui outros controles (<32) por espaço
-	var b []rune
-	for _, r := range s {
+
+	start := 0
+	end := len(s)
+
+	for start < end {
+		r, size := utf8.DecodeRuneInString(s[start:end])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		start += size
+	}
+	for end > start {
+		r, size := utf8.DecodeLastRuneInString(s[start:end])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		end -= size
+	}
+	if start >= end {
+		return ""
+	}
+
+	var b strings.Builder
+	b.Grow(end - start)
+
+	for i := start; i < end; {
+		r, size := utf8.DecodeRuneInString(s[i:end])
+		i += size
+
 		if r == '\r' || r == '\n' || r == '\t' {
-			// pular
 			continue
 		}
 		if r < 32 {
-			// substituir por espaço para manter separação
-			b = append(b, ' ')
+			b.WriteByte(' ')
 			continue
 		}
-		b = append(b, r)
+		b.WriteRune(r)
 	}
-	res := strings.TrimSpace(string(b))
-	return res
+
+	return b.String()
 }
 
 // parseBRLNumber: heurística robusta para entradas brasileiras/anglo
@@ -159,13 +182,6 @@ func mathRound(val float64, precision int) float64 {
 
 func (svc *service) formatTwoDecimalsComma(val float64) string {
 	return strings.Replace(fmt.Sprintf("%.2f", val), ".", ",", 1)
-}
-
-func getCell(row []string, index int) string {
-	if index >= 0 && index < len(row) {
-		return strings.TrimSpace(row[index])
-	}
-	return ""
 }
 
 // ---------------------- conversores Excel/CSV ----------------------
@@ -934,6 +950,10 @@ func (svc *service) buscarContaAtolini(texto string, contasMap map[string][]accE
 		return "999999"
 	}
 	descNorm := svc.normalizeText(t)
+	if descNorm == "" {
+		return "999999"
+	}
+	altNorm := stripLeadingNumberPrefix(descNorm)
 
 	// helper: pick best entry from slice applying classPrefixes filter (prefers longest classif)
 	pickBest := func(entries []accEntry, prefixes []string) (accEntry, bool) {
@@ -964,12 +984,26 @@ func (svc *service) buscarContaAtolini(texto string, contasMap map[string][]accE
 		return candidates[0], true
 	}
 
-	// 1) exato
-	if entries, ok := contasMap[descNorm]; ok && len(entries) > 0 {
-		if be, ok2 := pickBest(entries, classPrefixes); ok2 {
-			return strings.TrimSpace(be.ID)
+	tryKey := func(key string) (string, bool) {
+		if key == "" {
+			return "", false
 		}
-		// se pickBest falhar por filtro, não usar candidatos sem classif correspondente
+		if entries, ok := contasMap[key]; ok && len(entries) > 0 {
+			if be, ok2 := pickBest(entries, classPrefixes); ok2 {
+				return strings.TrimSpace(be.ID), true
+			}
+		}
+		return "", false
+	}
+
+	// 1) exato
+	if code, ok := tryKey(descNorm); ok {
+		return code
+	}
+	if altNorm != descNorm {
+		if code, ok := tryKey(altNorm); ok {
+			return code
+		}
 	}
 
 	// 2) fuzzy: construir candidateKeys aplicando filtro por classPrefixes (se houver)
@@ -998,12 +1032,16 @@ func (svc *service) buscarContaAtolini(texto string, contasMap map[string][]accE
 	}
 
 	if len(candidateKeys) > 0 {
-		cm := closestmatch.New(candidateKeys, []int{3, 4})
-		match := cm.Closest(descNorm)
-		if match != "" {
-			if entries, ok := contasMap[match]; ok && len(entries) > 0 {
-				if be, ok2 := pickBest(entries, classPrefixes); ok2 {
-					return strings.TrimSpace(be.ID)
+		cm := closestmatch.New(candidateKeys, []int{3, 4, 5})
+		if match := cm.Closest(descNorm); match != "" {
+			if code, ok := tryKey(match); ok {
+				return code
+			}
+		}
+		if altNorm != descNorm {
+			if matchAlt := cm.Closest(altNorm); matchAlt != "" {
+				if code, ok := tryKey(matchAlt); ok {
+					return code
 				}
 			}
 		}
@@ -1062,22 +1100,32 @@ func (svc *service) findDateInPreviousRows(sheet [][]string, idx int, lookback i
 	for i := start; i >= end; i-- {
 		row := sheet[i]
 		if len(row) > 0 {
-			c0 := strings.ToLower(strings.TrimSpace(row[0]))
-			if c0 != "" && strings.Contains(c0, "data de pagamento") {
-				if len(row) > 2 {
-					dataStr := strings.TrimSpace(row[2])
-					if dataStr != "" {
-						if t, err := time.Parse("02/01/2006", dataStr); err == nil {
-							return t.Format("02/01/2006"), true
-						}
-						if f, err := strconv.ParseFloat(dataStr, 64); err == nil {
-							if f > 35000 && f < 47000 {
-								return excelSerialToDate(f).Format("02/01/2006"), true
-							}
-						}
-						if d, ok := svc.findDateInRow(row); ok {
+			maxScan := len(row)
+			if maxScan > 6 {
+				maxScan = 6
+			}
+			for col := 0; col < maxScan; col++ {
+				cell := strings.TrimSpace(row[col])
+				if cell == "" {
+					continue
+				}
+				lower := strings.ToLower(cell)
+				if strings.Contains(lower, "data de pagamento") || strings.Contains(lower, "data do pagamento") || strings.Contains(lower, "data pagamento") || strings.Contains(lower, "data de receb") || strings.Contains(lower, "data do receb") || strings.Contains(lower, "data receb") || strings.Contains(lower, "dt receb") || strings.Contains(lower, "data baixa") {
+					if idx := strings.Index(cell, ":"); idx != -1 && idx+1 < len(cell) {
+						if d, ok := svc.parseDateDayFirst(strings.TrimSpace(cell[idx+1:])); ok {
 							return d, true
 						}
+					}
+					for _, offset := range []int{col + 1, col + 2, col + 3} {
+						if offset >= len(row) {
+							continue
+						}
+						if d, ok := svc.parseDateDayFirst(strings.TrimSpace(row[offset])); ok {
+							return d, true
+						}
+					}
+					if d, ok := svc.findDateInRow(row); ok {
+						return d, true
 					}
 				}
 			}
@@ -1128,8 +1176,9 @@ func (svc *service) ProcessAtoliniPagamentos(
 		return nil, err
 	}
 
-	var out []domain.AtoliniPagamentosOutputRow
+	out := make([]domain.AtoliniPagamentosOutputRow, 0, len(rows))
 	var blockDate string
+	var blockDateSanitized string
 	inHistorico := false
 
 	// ---------- caches p/ evitar fuzzy match repetido ----------
@@ -1137,21 +1186,88 @@ func (svc *service) ProcessAtoliniPagamentos(
 	debCache := make(map[string]string, 256)
 	credCache := make(map[string]string, 64)
 
-	normalizeKey := func(desc string, prefixes []string) string {
-		// normalização leve e barata suficiente para chave de cache
-		d := strings.ToUpper(strings.TrimSpace(desc))
-		return d + "|" + strings.Join(prefixes, ",")
+	debitKeySuffix := strings.Join(debitPrefixes, ",")
+	creditKeySuffix := strings.Join(creditPrefixes, ",")
+
+	buildCacheKey := func(upperDesc string, suffix string) string {
+		if suffix == "" {
+			return upperDesc
+		}
+		var b strings.Builder
+		b.Grow(len(upperDesc) + 1 + len(suffix))
+		b.WriteString(upperDesc)
+		b.WriteByte('|')
+		b.WriteString(suffix)
+		return b.String()
 	}
 
 	// ---------- helpers leves ----------
-	normLower := func(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+	var (
+		trimCache  []string
+		lowerCache []string
+		upperCache []string
+		trimGen    []uint64
+		lowerGen   []uint64
+		upperGen   []uint64
+		rowGen     uint64
+	)
+
+	ensureRowCapacity := func(size int) {
+		if len(trimCache) >= size {
+			return
+		}
+		trimCache = make([]string, size)
+		lowerCache = make([]string, size)
+		upperCache = make([]string, size)
+		trimGen = make([]uint64, size)
+		lowerGen = make([]uint64, size)
+		upperGen = make([]uint64, size)
+	}
+
+	advanceRow := func(size int) {
+		ensureRowCapacity(size)
+		rowGen++
+	}
+
+	trimmedCell := func(row []string, idx int) string {
+		if idx < 0 || idx >= len(row) {
+			return ""
+		}
+		if trimGen[idx] != rowGen {
+			trimCache[idx] = strings.TrimSpace(row[idx])
+			trimGen[idx] = rowGen
+		}
+		return trimCache[idx]
+	}
+
+	lowerCell := func(row []string, idx int) string {
+		if idx < 0 || idx >= len(row) {
+			return ""
+		}
+		if lowerGen[idx] != rowGen {
+			lowerCache[idx] = strings.ToLower(trimmedCell(row, idx))
+			lowerGen[idx] = rowGen
+		}
+		return lowerCache[idx]
+	}
+
+	upperCell := func(row []string, idx int) string {
+		if idx < 0 || idx >= len(row) {
+			return ""
+		}
+		if upperGen[idx] != rowGen {
+			upperCache[idx] = strings.ToUpper(trimmedCell(row, idx))
+			upperGen[idx] = rowGen
+		}
+		return upperCache[idx]
+	}
 
 	rowHasPrefixN := func(row []string, n int, prefixes ...string) bool {
 		if n > len(row) {
 			n = len(row)
 		}
 		for i := 0; i < n; i++ {
-			cell := normLower(row[i])
+			cell := lowerCell(row, i)
 			for _, p := range prefixes {
 				if strings.HasPrefix(cell, p) {
 					return true
@@ -1169,7 +1285,7 @@ func (svc *service) ProcessAtoliniPagamentos(
 			maxScan = len(row)
 		}
 		for i := 0; i < maxScan; i++ {
-			if strings.Contains(normLower(row[i]), "data de pag") {
+			if strings.Contains(lowerCell(row, i), "data de pag") {
 				labelCol = i
 				break
 			}
@@ -1177,62 +1293,78 @@ func (svc *service) ProcessAtoliniPagamentos(
 		if labelCol == -1 {
 			return false
 		}
-		for _, ci := range []int{9, labelCol + 1, labelCol + 2} {
-			if d, ok := svc.parseDateDayFirst(getCell(row, ci)); ok {
+		for _, ci := range [...]int{9, labelCol + 1, labelCol + 2} {
+			if d, ok := svc.parseDateDayFirst(trimmedCell(row, ci)); ok {
 				blockDate = d
+				blockDateSanitized = sanitizeForCSV(d)
 				return true
 			}
 		}
 		if d2, ok2 := svc.findDateInRow(row); ok2 {
 			blockDate = d2
+			blockDateSanitized = sanitizeForCSV(d2)
 			return true
 		}
 		return false
 	}
 
-	isBankish := func(s string) bool {
-		s = strings.ToUpper(strings.TrimSpace(s))
-		if s == "" {
+	bankHints := [...]string{"SICRED", "BANCO", "BRADESCO", "ITAU", "SANTAND", "CAIXA", "BB", "CAIXA GERAL", "REBATE", "BAIXA DEVOL"}
+
+	isBankishUpper := func(upper string) bool {
+		if upper == "" {
 			return false
 		}
-		for _, h := range []string{"SICRED", "BANCO", "BRADESCO", "ITAU", "SANTAND", "CAIXA", "BB", "CAIXA GERAL"} {
-			if strings.Contains(s, h) {
+		for _, h := range bankHints {
+			if strings.Contains(upper, h) {
 				return true
 			}
 		}
 		return false
 	}
 
+	valueColumns := [...]int{8, 10, 11, 12, 9}
+
 	// Valor: prioridade coluna I(8); depois vizinhas e J(9) como último recurso.
-	pickValorStr := func(row []string) string {
-		for _, ci := range []int{8, 10, 11, 12, 9} {
-			v := strings.TrimSpace(getCell(row, ci))
+	pickValor := func(row []string) (float64, bool) {
+		for _, ci := range valueColumns {
+			v := trimmedCell(row, ci)
 			if v == "" || v == "0,00" {
 				continue
 			}
-			if _, err := svc.parseBRLNumber(v); err == nil {
-				return v
+			if parsed, err := svc.parseBRLNumber(v); err == nil {
+				return parsed, true
 			}
 		}
-		return ""
+		return 0, false
 	}
 
-	pickBanco := func(row []string) string {
-		if isBankish(getCell(row, 19)) {
-			return getCell(row, 19)
+	formatMoney := func(row []string, idx int) string {
+		raw := trimmedCell(row, idx)
+		if raw == "" {
+			return ""
+		}
+		if parsed, err := svc.parseBRLNumber(raw); err == nil {
+			return svc.formatTwoDecimalsComma(parsed)
+		}
+		return raw
+	}
+
+	pickBanco := func(row []string) (string, string) {
+		if upper := upperCell(row, 19); isBankishUpper(upper) {
+			return trimmedCell(row, 19), upper
 		} // T
-		for _, c := range []int{18, 20, 21} { // S, U, V
-			if isBankish(getCell(row, c)) {
-				return getCell(row, c)
+		for _, c := range [...]int{18, 20, 21} { // S, U, V
+			if upper := upperCell(row, c); isBankishUpper(upper) {
+				return trimmedCell(row, c), upper
 			}
 		}
-		return ""
+		return "", ""
 	}
 
 	extractDoc := func(row []string) string {
 		// célula com 3+ dígitos (barato e suficiente p/ fallback)
-		for _, c := range row {
-			c = strings.TrimSpace(c)
+		for i := range row {
+			c := trimmedCell(row, i)
 			if len(c) < 3 {
 				continue
 			}
@@ -1251,6 +1383,7 @@ func (svc *service) ProcessAtoliniPagamentos(
 
 	// ----------------------- único loop O(n) -----------------------
 	for _, row := range rows {
+		advanceRow(len(row))
 		// 1) data do bloco (cabeçalho)
 		if updateBlockDateIfHeader(row) {
 			continue
@@ -1270,57 +1403,66 @@ func (svc *service) ProcessAtoliniPagamentos(
 		}
 
 		// 3) valor rápido (I -> vizinhas -> J)
-		valStr := pickValorStr(row)
-		if valStr == "" {
+		val, ok := pickValor(row)
+		if !ok {
 			continue
 		}
-		val, _ := svc.parseBRLNumber(valStr)
 
 		// 4) descrição (B) + histórico (B + " NF " + D / doc)
-		descDebRaw := getCell(row, 1) // B
-		descDeb := strings.TrimSpace(descDebRaw)
+		descDeb := trimmedCell(row, 1) // B
 		hist := descDeb
-		if dcol := strings.TrimSpace(getCell(row, 3)); dcol != "" { // D
-			hist = descDeb + " NF " + dcol
-		} else if doc := strings.TrimSpace(extractDoc(row)); doc != "" && descDeb != "" {
+		if dcol := trimmedCell(row, 3); dcol != "" { // D
+			if descDeb != "" {
+				hist = descDeb + " NF " + dcol
+			} else {
+				hist = " NF " + dcol
+			}
+		} else if doc := extractDoc(row); doc != "" && descDeb != "" {
 			hist = descDeb + " NF " + doc
 		}
 
 		// 5) banco (crédito)
-		descCredRaw := pickBanco(row)
-		descCred := strings.TrimSpace(descCredRaw)
+		descCred, descCredUpper := pickBanco(row)
 
 		// 6) matching com CACHE
 		var debID, credID string
 
 		if descDeb != "" {
-			k := normalizeKey(descDeb, debitPrefixes)
-			if id, ok := debCache[k]; ok {
+			debKey := buildCacheKey(upperCell(row, 1), debitKeySuffix)
+			if id, ok := debCache[debKey]; ok {
 				debID = id
 			} else {
 				debID = svc.buscarContaAtolini(descDeb, contasMap, descricaoIndex, debitPrefixes)
-				debCache[k] = debID
+				debCache[debKey] = debID
 			}
 		}
 
 		if descCred != "" {
-			k := normalizeKey(descCred, creditPrefixes)
-			if id, ok := credCache[k]; ok {
+			credKey := buildCacheKey(descCredUpper, creditKeySuffix)
+			if id, ok := credCache[credKey]; ok {
 				credID = id
 			} else {
 				credID = svc.buscarContaAtolini(descCred, contasMap, descricaoIndex, creditPrefixes)
-				credCache[k] = credID
+				credCache[credKey] = credID
 			}
 		}
 
 		out = append(out, domain.AtoliniPagamentosOutputRow{
-			Data:             sanitizeForCSV(blockDate),
-			Debito:           sanitizeForCSV(debID),
-			DescricaoConta:   sanitizeForCSV(descDeb),
-			Credito:          sanitizeForCSV(credID),
-			DescricaoCredito: sanitizeForCSV(descCred),
-			Valor:            sanitizeForCSV(svc.formatTwoDecimalsComma(val)),
-			Historico:        sanitizeForCSV(hist),
+			Data:              blockDateSanitized,
+			Debito:            sanitizeForCSV(debID),
+			DescricaoConta:    sanitizeForCSV(descDeb),
+			Credito:           sanitizeForCSV(credID),
+			DescricaoCredito:  sanitizeForCSV(descCred),
+			Valor:             sanitizeForCSV(svc.formatTwoDecimalsComma(val)),
+			Historico:         sanitizeForCSV(hist),
+			ValorOriginal:     sanitizeForCSV(formatMoney(row, 7)),
+			ValorPago:         sanitizeForCSV(formatMoney(row, 8)),
+			ValorJuros:        sanitizeForCSV(formatMoney(row, 9)),
+			ValorMulta:        sanitizeForCSV(formatMoney(row, 11)),
+			ValorDesconto:     sanitizeForCSV(formatMoney(row, 12)),
+			ValorDespesas:     sanitizeForCSV(formatMoney(row, 13)),
+			VarCam:            sanitizeForCSV(formatMoney(row, 15)),
+			ValorLiqPagoBanco: sanitizeForCSV(formatMoney(row, 17)),
 		})
 	}
 
@@ -1332,7 +1474,8 @@ func (svc *service) gerarCSVAtoliniPagamentos(rows []domain.AtoliniPagamentosOut
 	writer := csv.NewWriter(&buffer)
 	writer.Comma = ';'
 
-	header := []string{"Data", "Debito", "Descição conta", "Credito", "Descrição Crédito", "Valor", "histórico"}
+	header := []string{"Data", "Debito", "Descição conta", "Credito", "Descrição Crédito", "Valor", "histórico", "Valor Original",
+		"Valor Juros", "Valor Multa", "Valor Desconto", "Valor Despesas", "Var Cam", "Valor Liq Pago Banco"}
 	for i := range header {
 		header[i] = sanitizeForCSV(header[i])
 	}
@@ -1342,13 +1485,21 @@ func (svc *service) gerarCSVAtoliniPagamentos(rows []domain.AtoliniPagamentosOut
 
 	for _, row := range rows {
 		record := []string{
-			sanitizeForCSV(row.Data),
-			sanitizeForCSV(row.Debito),
-			sanitizeForCSV(row.DescricaoConta),
-			sanitizeForCSV(row.Credito),
-			sanitizeForCSV(row.DescricaoCredito),
-			sanitizeForCSV(row.Valor),
-			sanitizeForCSV(row.Historico),
+			row.Data,
+			row.Debito,
+			row.DescricaoConta,
+			row.Credito,
+			row.DescricaoCredito,
+			row.Valor,
+			row.Historico,
+			row.ValorOriginal,
+			row.ValorPago,
+			row.ValorJuros,
+			row.ValorMulta,
+			row.ValorDesconto,
+			row.ValorDespesas,
+			row.VarCam,
+			row.ValorLiqPagoBanco,
 		}
 		if err := writer.Write(record); err != nil {
 			return nil, err
@@ -1754,40 +1905,494 @@ func (svc *service) ProcessAtoliniRecebimentos(excelFile io.Reader, contasFile i
 		return nil, err
 	}
 
-	var finalRows []domain.AtoliniRecebimentosOutputRow
-	currentData := ""
-	currentDescDebito := ""
-	currentCodDebito := "999999"
+	finalRows := make([]domain.AtoliniRecebimentosOutputRow, 0, len(rows))
 
-	for rIdx, row := range rows {
-		// procura marcador de data em qualquer célula
+	var (
+		blockDate          string
+		blockDateSanitized string
+		currentDescDebito  string
+		currentCodDebito   = "999999"
+	)
+
+	debCache := make(map[string]string, 256)
+	credCache := make(map[string]string, 256)
+	debitKeySuffix := strings.Join(debitPrefixes, ",")
+	creditKeySuffix := strings.Join(creditPrefixes, ",")
+
+	buildCacheKey := func(upperDesc string, suffix string) string {
+		if suffix == "" {
+			return upperDesc
+		}
+		var b strings.Builder
+		b.Grow(len(upperDesc) + 1 + len(suffix))
+		b.WriteString(upperDesc)
+		b.WriteByte('|')
+		b.WriteString(suffix)
+		return b.String()
+	}
+
+	setCurrentDebit := func(desc string) {
+		desc = strings.TrimSpace(desc)
+		if desc == "" {
+			currentDescDebito = ""
+			currentCodDebito = "999999"
+			return
+		}
+		currentDescDebito = desc
+		upper := strings.ToUpper(desc)
+		key := buildCacheKey(upper, debitKeySuffix)
+		if code, ok := debCache[key]; ok {
+			currentCodDebito = code
+			return
+		}
+		code := svc.findContaCodigoByDescricao(desc, descricaoIndex, contasMap, debitPrefixes)
+		if code == "" {
+			code = "999999"
+		}
+		debCache[key] = code
+		currentCodDebito = code
+	}
+
+	var (
+		trimCache  []string
+		lowerCache []string
+		upperCache []string
+		trimGen    []uint64
+		lowerGen   []uint64
+		upperGen   []uint64
+		rowGen     uint64
+	)
+
+	ensureRowCapacity := func(size int) {
+		if len(trimCache) >= size {
+			return
+		}
+		trimCache = make([]string, size)
+		lowerCache = make([]string, size)
+		upperCache = make([]string, size)
+		trimGen = make([]uint64, size)
+		lowerGen = make([]uint64, size)
+		upperGen = make([]uint64, size)
+	}
+
+	advanceRow := func(size int) {
+		ensureRowCapacity(size)
+		rowGen++
+	}
+
+	trimmedCell := func(row []string, idx int) string {
+		if idx < 0 || idx >= len(row) {
+			return ""
+		}
+		if trimGen[idx] != rowGen {
+			trimCache[idx] = strings.TrimSpace(row[idx])
+			trimGen[idx] = rowGen
+		}
+		return trimCache[idx]
+	}
+
+	lowerCell := func(row []string, idx int) string {
+		if idx < 0 || idx >= len(row) {
+			return ""
+		}
+		if lowerGen[idx] != rowGen {
+			lowerCache[idx] = strings.ToLower(trimmedCell(row, idx))
+			lowerGen[idx] = rowGen
+		}
+		return lowerCache[idx]
+	}
+
+	upperCell := func(row []string, idx int) string {
+		if idx < 0 || idx >= len(row) {
+			return ""
+		}
+		if upperGen[idx] != rowGen {
+			upperCache[idx] = strings.ToUpper(trimmedCell(row, idx))
+			upperGen[idx] = rowGen
+		}
+		return upperCache[idx]
+	}
+
+	type columnHints struct {
+		doc            int
+		historico      int
+		valorPrincipal int
+		juros          int
+		desconto       int
+		despBanco      int
+		despCartorio   int
+		vlLiqPago      int
+		banco          int
+	}
+
+	hints := columnHints{
+		doc:            -1,
+		historico:      -1,
+		valorPrincipal: -1,
+		juros:          -1,
+		desconto:       -1,
+		despBanco:      -1,
+		despCartorio:   -1,
+		vlLiqPago:      -1,
+		banco:          -1,
+	}
+
+	updateColumnHints := func(row []string) bool {
+		var (
+			docHit       bool
+			histHit      bool
+			principalHit bool
+			jurosHit     bool
+			descHit      bool
+			despBcoHit   bool
+			despCartHit  bool
+			vlLiqHit     bool
+			bancoHit     bool
+		)
+
+		for idx := range row {
+			upper := upperCell(row, idx)
+			if upper == "" {
+				continue
+			}
+
+			if !docHit && (strings.Contains(upper, "DOCUMENT") || strings.HasPrefix(upper, "DOC")) {
+				docHit = true
+				if hints.doc == -1 {
+					hints.doc = idx
+				}
+			}
+			if !histHit && strings.Contains(upper, "HIST") {
+				histHit = true
+				if hints.historico == -1 {
+					hints.historico = idx
+				}
+			}
+			if strings.Contains(upper, "VALOR PRINC") || strings.Contains(upper, "VL PRINC") || strings.Contains(upper, "VLR PRINC") {
+				principalHit = true
+				if hints.valorPrincipal == -1 {
+					hints.valorPrincipal = idx
+				}
+			}
+			if strings.Contains(upper, "JUROS") {
+				jurosHit = true
+				if hints.juros == -1 {
+					hints.juros = idx
+				}
+			}
+			if strings.Contains(upper, "DESCONTO") || strings.Contains(upper, "DESC.") {
+				descHit = true
+				if hints.desconto == -1 {
+					hints.desconto = idx
+				}
+			}
+			if strings.Contains(upper, "DESP") && strings.Contains(upper, "BANC") {
+				despBcoHit = true
+				if hints.despBanco == -1 {
+					hints.despBanco = idx
+				}
+			}
+			if strings.Contains(upper, "DESP") && strings.Contains(upper, "CART") {
+				despCartHit = true
+				if hints.despCartorio == -1 {
+					hints.despCartorio = idx
+				}
+			}
+			if strings.Contains(upper, "VL") && strings.Contains(upper, "LIQ") {
+				vlLiqHit = true
+				if hints.vlLiqPago == -1 {
+					hints.vlLiqPago = idx
+				}
+			}
+			if strings.Contains(upper, "BANCO") || strings.Contains(upper, "INSTITU") {
+				bancoHit = true
+				if hints.banco == -1 {
+					hints.banco = idx
+				}
+			}
+		}
+
+		hits := 0
+		if docHit {
+			hits++
+		}
+		if histHit {
+			hits++
+		}
+		if principalHit {
+			hits++
+		}
+		if jurosHit {
+			hits++
+		}
+		if descHit {
+			hits++
+		}
+		if despBcoHit {
+			hits++
+		}
+		if despCartHit {
+			hits++
+		}
+		if vlLiqHit {
+			hits++
+		}
+		if bancoHit {
+			hits++
+		}
+
+		return hits >= 3
+	}
+
+	bankHints := []string{"SICRED", "SICOOB", "BANCO", "BRADESCO", "ITAU", "ITAÚ", "SANTAND", "CAIXA", "CEF", "BB", "COOP", "COOPER", "FINANC", "REBATE", "BAIXA DEVOL"}
+
+	isBankish := func(upper string) bool {
+		if upper == "" {
+			return false
+		}
+		for _, hint := range bankHints {
+			if strings.Contains(upper, hint) {
+				return true
+			}
+		}
+		return false
+	}
+
+	firstNonEmpty := func(row []string, indices []int) string {
+		seen := make(map[int]struct{}, len(indices))
+		for _, idx := range indices {
+			if idx < 0 || idx >= len(row) {
+				continue
+			}
+			if _, ok := seen[idx]; ok {
+				continue
+			}
+			seen[idx] = struct{}{}
+			if val := trimmedCell(row, idx); val != "" {
+				return val
+			}
+		}
+		return ""
+	}
+
+	parseValueFrom := func(row []string, indices []int) (float64, bool) {
+		seen := make(map[int]struct{}, len(indices))
+		for _, idx := range indices {
+			if idx < 0 || idx >= len(row) {
+				continue
+			}
+			if _, ok := seen[idx]; ok {
+				continue
+			}
+			seen[idx] = struct{}{}
+			val := trimmedCell(row, idx)
+			if val == "" {
+				continue
+			}
+			if parsed, err := svc.parseBRLNumber(val); err == nil {
+				return parsed, true
+			}
+		}
+		return 0, false
+	}
+
+	buildCandidates := func(lancIdx int, abs []int, rel []int) []int {
+		total := len(abs) + len(rel)
+		if total == 0 {
+			return nil
+		}
+		indices := make([]int, 0, total)
+		seen := make(map[int]struct{}, total)
+		for _, idx := range abs {
+			if idx < 0 {
+				continue
+			}
+			if _, ok := seen[idx]; ok {
+				continue
+			}
+			seen[idx] = struct{}{}
+			indices = append(indices, idx)
+		}
+		for _, off := range rel {
+			idx := lancIdx + off
+			if idx < 0 {
+				continue
+			}
+			if _, ok := seen[idx]; ok {
+				continue
+			}
+			seen[idx] = struct{}{}
+			indices = append(indices, idx)
+		}
+		return indices
+	}
+
+	pickDescricaoCredito := func(row []string, lancIdx int) (string, string) {
+		base := stripLeadingNumberPrefix(extractAfterHyphen(trimmedCell(row, lancIdx)))
+		if base == "" {
+			base = stripLeadingNumberPrefix(trimmedCell(row, lancIdx))
+		}
+		base = strings.TrimSpace(base)
+		baseUpper := strings.ToUpper(base)
+
+		if base != "" && isBankish(baseUpper) {
+			return base, baseUpper
+		}
+
+		fallbackDesc := base
+		fallbackUpper := baseUpper
+
+		seen := make(map[int]struct{})
+
+		tryIndex := func(idx int) (string, string, bool) {
+			if idx < 0 || idx >= len(row) {
+				return "", "", false
+			}
+			if _, ok := seen[idx]; ok {
+				return "", "", false
+			}
+			seen[idx] = struct{}{}
+			raw := trimmedCell(row, idx)
+			if raw == "" {
+				return "", "", false
+			}
+			cleaned := strings.TrimSpace(stripLeadingNumberPrefix(raw))
+			if cleaned == "" {
+				cleaned = raw
+			}
+			upper := strings.ToUpper(cleaned)
+			if isBankish(upper) {
+				return cleaned, upper, true
+			}
+			if fallbackDesc == "" {
+				fallbackDesc = cleaned
+				fallbackUpper = upper
+			}
+			return "", "", false
+		}
+
+		candidates := []int{hints.banco, lancIdx + 6, lancIdx + 5, lancIdx + 7}
+		candidates = append(candidates, []int{18, 19, 20, 21, 22, 17, 16, 15}...)
+		for i := len(row) - 1; i >= 0; i-- {
+			candidates = append(candidates, i)
+		}
+
+		for _, idx := range candidates {
+			if desc, upper, ok := tryIndex(idx); ok {
+				return desc, upper
+			}
+		}
+
+		return fallbackDesc, fallbackUpper
+	}
+
+	updateBlockDate := func(row []string, lancIdx int) bool {
+		nonEmpty := 0
+		for i := range row {
+			if trimmedCell(row, i) != "" {
+				nonEmpty++
+			}
+		}
+
+		var candidate string
+
 		if dIdx := findDataMarkerIndex(row); dIdx != -1 {
-			// muitas vezes a data vem na coluna à direita do "DATA:"
-			dataVal := getCell(row, dIdx+1)
-			if d, ok := svc.parseDateDayFirst(dataVal); ok {
-				currentData = d
-			} else {
-				// tentativa alternativa: varrer a linha e buscar qualquer data
-				if d2, ok2 := svc.findDateInRow(row); ok2 {
-					currentData = d2
-				} else {
-					// tentar também coluna 2
-					if d3, ok3 := svc.parseDateDayFirst(getCell(row, 2)); ok3 {
-						currentData = d3
-					} else {
-						currentData = ""
+			marker := trimmedCell(row, dIdx)
+			if idx := strings.Index(marker, ":"); idx != -1 && idx+1 < len(marker) {
+				if d, ok := svc.parseDateDayFirst(strings.TrimSpace(marker[idx+1:])); ok {
+					candidate = d
+				}
+			}
+			if candidate == "" {
+				if d, ok := svc.parseDateDayFirst(trimmedCell(row, dIdx+1)); ok {
+					candidate = d
+				}
+			}
+			if candidate == "" {
+				if d, ok := svc.parseDateDayFirst(trimmedCell(row, dIdx+2)); ok {
+					candidate = d
+				}
+			}
+			if candidate == "" {
+				if d, ok := svc.parseDateDayFirst(trimmedCell(row, 2)); ok {
+					candidate = d
+				}
+			}
+			if candidate == "" {
+				if d, ok := svc.findDateInRow(row); ok {
+					candidate = d
+				}
+			}
+		}
+
+		if candidate == "" {
+			for i := 0; i < len(row) && i < 6; i++ {
+				lower := lowerCell(row, i)
+				if lower == "" {
+					continue
+				}
+				if strings.Contains(lower, "data do receb") || strings.Contains(lower, "data de receb") || strings.Contains(lower, "data receb") || strings.Contains(lower, "dt receb") || (strings.Contains(lower, "data") && strings.Contains(lower, "baix")) {
+					if d, ok := svc.findDateInRow([]string{row[i]}); ok {
+						candidate = d
+						break
+					}
+					for _, idx := range []int{i + 1, i + 2, i + 3} {
+						if candidate != "" {
+							break
+						}
+						if d, ok := svc.parseDateDayFirst(trimmedCell(row, idx)); ok {
+							candidate = d
+							break
+						}
+					}
+					if candidate == "" {
+						if d, ok := svc.findDateInRow(row); ok {
+							candidate = d
+						}
+					}
+					if candidate != "" {
+						break
 					}
 				}
 			}
+		}
+
+		if candidate == "" && lancIdx == -1 && nonEmpty == 1 {
+			if d, ok := svc.findDateInRow(row); ok {
+				candidate = d
+			}
+		}
+
+		if candidate != "" {
+			blockDate = candidate
+			blockDateSanitized = sanitizeForCSV(candidate)
+			return lancIdx == -1 && nonEmpty <= 6
+		}
+		return false
+	}
+
+	for rIdx, row := range rows {
+		advanceRow(len(row))
+
+		lancIdx := -1
+		for i := range row {
+			if isLancamento(row[i]) {
+				lancIdx = i
+				break
+			}
+		}
+
+		if updateBlockDate(row, lancIdx) {
 			continue
 		}
 
-		// procura marcador de portador em qualquer célula da linha
+		if updateColumnHints(row) {
+			continue
+		}
+
 		if pIdx := findPortadorIndex(row); pIdx != -1 {
-			// tenta extrair o nome do portador nas colunas próximas (retorna já limpo)
 			descDeb := pickPortadorFromRow(row, pIdx)
 			if descDeb == "" {
-				// fallback: procurar diretamente em colunas próximas (pIdx+1 .. pIdx+6)
 				for j := pIdx + 1; j <= pIdx+6 && j < len(row); j++ {
 					candidate := strings.TrimSpace(row[j])
 					if candidate == "" {
@@ -1799,144 +2404,104 @@ func (svc *service) ProcessAtoliniRecebimentos(excelFile io.Reader, contasFile i
 					}
 				}
 			}
-			// setar current
-			descDeb = strings.TrimSpace(descDeb)
-			if descDeb == "" {
+			if strings.TrimSpace(descDeb) == "" {
 				currentDescDebito = ""
 				currentCodDebito = "999999"
 			} else {
-				currentDescDebito = descDeb
-				currentCodDebito = svc.findContaCodigoByDescricao(currentDescDebito, descricaoIndex, contasMap, debitPrefixes)
-				if currentCodDebito == "" {
-					currentCodDebito = "999999"
-				}
+				setCurrentDebit(descDeb)
 			}
 			continue
 		}
 
-		// se a linha é um lançamento (procurar string 'NNN - descrição' em qualquer coluna)
-		lancIdx := -1
-		for i, c := range row {
-			if isLancamento(c) {
-				lancIdx = i
-				break
+		if lancIdx == -1 {
+			continue
+		}
+
+		effectiveDate := blockDate
+		effectiveDateSanitized := blockDateSanitized
+		if effectiveDate == "" {
+			if d, ok := svc.findDateInPreviousRows(rows, rIdx, 60); ok {
+				effectiveDate = d
+				effectiveDateSanitized = sanitizeForCSV(d)
+			}
+		}
+		if effectiveDate == "" {
+			if d, ok := svc.findDateInRow(row); ok {
+				effectiveDate = d
+				effectiveDateSanitized = sanitizeForCSV(d)
 			}
 		}
 
-		if lancIdx != -1 {
-			// garantir que temos data atual: se não, procurar linhas anteriores
-			if currentData == "" {
-				if d, ok := svc.findDateInPreviousRows(rows, rIdx, 60); ok {
-					currentData = d
-				}
+		if currentDescDebito == "" {
+			if p, ok := findLastPortadorBefore(rows, rIdx, 60); ok {
+				setCurrentDebit(p)
 			}
-
-			// garantir que temos portador atual: se não, procurar o último portador acima
-			if currentDescDebito == "" {
-				if p, ok := findLastPortadorBefore(rows, rIdx, 60); ok {
-					currentDescDebito = p
-					currentCodDebito = svc.findContaCodigoByDescricao(currentDescDebito, descricaoIndex, contasMap, debitPrefixes)
-					if currentCodDebito == "" {
-						currentCodDebito = "999999"
-					}
-				}
-			}
-
-			c0 := getCell(row, lancIdx)
-			descCredito := extractAfterHyphen(c0)
-			// remover possíveis prefixos numéricos residuais
-			descCredito = stripLeadingNumberPrefix(descCredito)
-
-			codCredito := svc.findContaCodigoByDescricao(descCredito, descricaoIndex, contasMap, creditPrefixes)
-			if codCredito == "" {
-				codCredito = "999999"
-			}
-
-			// valores e histórico: tentativa de localizar colunas comuns (c5, c9, etc)
-			// priorizamos colunas relativas ao índice do lançamento
-			getRel := func(base, offset int) string {
-				return getCell(row, base+offset)
-			}
-
-			// heurística: se lancIdx == 0, usar c5=carta, c9=historic
-			c5 := ""
-			c9 := ""
-			// preferências: try common absolute positions, then positions relative to lancIdx
-			if len(row) > 4 {
-				c5 = getCell(row, 4)
-			}
-			if len(row) > 9 {
-				c9 = getCell(row, 9)
-			}
-			// if empty, try relative offsets
-			if c5 == "" {
-				c5 = getRel(lancIdx, 4)
-			}
-			if c9 == "" {
-				c9 = getRel(lancIdx, 9)
-			}
-
-			historico := strings.TrimSpace(c9)
-			if historico != "" {
-				historico += " "
-			}
-			historico += "CONFORME DOCUMENTO " + strings.TrimSpace(c5)
-			if descCredito != "" {
-				historico += " DE " + descCredito
-			}
-			historico = sanitizeForCSV(strings.TrimSpace(historico))
-
-			// valores: tentar posições comuns; se vazio, usar offsets
-			vPrincipal, _ := svc.parseBRLNumber(getCell(row, 12))
-			vJuros, _ := svc.parseBRLNumber(getCell(row, 13))
-			vDesc, _ := svc.parseBRLNumber(getCell(row, 14))
-			vDespBco, _ := svc.parseBRLNumber(getCell(row, 15))
-			vDespCart, _ := svc.parseBRLNumber(getCell(row, 16))
-			vVlliq, _ := svc.parseBRLNumber(getCell(row, 17))
-
-			// fallback: se valores estiverem vazios, tentar posições relativas ao lancIdx
-			if vPrincipal == 0 {
-				vPrincipal, _ = svc.parseBRLNumber(getRel(lancIdx, 12))
-			}
-			if vJuros == 0 {
-				vJuros, _ = svc.parseBRLNumber(getRel(lancIdx, 13))
-			}
-			if vDesc == 0 {
-				vDesc, _ = svc.parseBRLNumber(getRel(lancIdx, 14))
-			}
-			if vDespBco == 0 {
-				vDespBco, _ = svc.parseBRLNumber(getRel(lancIdx, 15))
-			}
-			if vDespCart == 0 {
-				vDespCart, _ = svc.parseBRLNumber(getRel(lancIdx, 16))
-			}
-			if vVlliq == 0 {
-				vVlliq, _ = svc.parseBRLNumber(getRel(lancIdx, 17))
-			}
-
-			finalRows = append(finalRows, domain.AtoliniRecebimentosOutputRow{
-				Data:             sanitizeForCSV(currentData),
-				DescricaoCredito: sanitizeForCSV(descCredito),
-				ContaCredito:     sanitizeForCSV(codCredito),
-				DescricaoDebito:  sanitizeForCSV(currentDescDebito),
-				ContaDebito:      sanitizeForCSV(currentCodDebito),
-				Historico:        historico,
-				ValorPrincipal:   sanitizeForCSV(svc.formatTwoDecimalsComma(vPrincipal)),
-				Juros:            sanitizeForCSV(svc.formatTwoDecimalsComma(vJuros)),
-				Desconto:         sanitizeForCSV(svc.formatTwoDecimalsComma(vDesc)),
-				DespBanco:        sanitizeForCSV(svc.formatTwoDecimalsComma(vDespBco)),
-				DespCartorio:     sanitizeForCSV(svc.formatTwoDecimalsComma(vDespCart)),
-				VlLiqPago:        sanitizeForCSV(svc.formatTwoDecimalsComma(vVlliq)),
-			})
 		}
 
-		// continue loop
-		_ = rIdx
+		descCredito, descCreditoUpper := pickDescricaoCredito(row, lancIdx)
+		codCredito := "999999"
+		if descCredito != "" {
+			key := buildCacheKey(descCreditoUpper, creditKeySuffix)
+			if cached, ok := credCache[key]; ok {
+				codCredito = cached
+			} else {
+				code := svc.findContaCodigoByDescricao(descCredito, descricaoIndex, contasMap, creditPrefixes)
+				if code == "" {
+					code = "999999"
+				}
+				credCache[key] = code
+				codCredito = code
+			}
+		}
+
+		docCandidates := buildCandidates(lancIdx, []int{hints.doc, 4, 5}, []int{4, 5, 3})
+		doc := firstNonEmpty(row, docCandidates)
+
+		histCandidates := buildCandidates(lancIdx, []int{hints.historico, 9, 8, 10}, []int{9, 8, 10, 7})
+		histBase := firstNonEmpty(row, histCandidates)
+
+		historico := strings.TrimSpace(histBase)
+		if historico != "" {
+			historico += " "
+		}
+		historico += "CONFORME DOCUMENTO " + strings.TrimSpace(doc)
+		if descCredito != "" {
+			historico += " DE " + descCredito
+		}
+		historico = sanitizeForCSV(strings.TrimSpace(historico))
+
+		principalCandidates := buildCandidates(lancIdx, []int{hints.valorPrincipal, 12, 11, 13}, []int{12, 11, 13, 10})
+		jurosCandidates := buildCandidates(lancIdx, []int{hints.juros, 13, 12, 14}, []int{13, 12, 14})
+		descontoCandidates := buildCandidates(lancIdx, []int{hints.desconto, 14, 13, 15}, []int{14, 13, 15})
+		despBancoCandidates := buildCandidates(lancIdx, []int{hints.despBanco, 15, 14, 16}, []int{15, 14, 16})
+		despCartCandidates := buildCandidates(lancIdx, []int{hints.despCartorio, 16, 15, 17}, []int{16, 15, 17})
+		liquidoCandidates := buildCandidates(lancIdx, []int{hints.vlLiqPago, 17, 16, 18, 19}, []int{17, 16, 18})
+
+		vPrincipal, _ := parseValueFrom(row, principalCandidates)
+		vJuros, _ := parseValueFrom(row, jurosCandidates)
+		vDesc, _ := parseValueFrom(row, descontoCandidates)
+		vDespBco, _ := parseValueFrom(row, despBancoCandidates)
+		vDespCart, _ := parseValueFrom(row, despCartCandidates)
+		vVlliq, _ := parseValueFrom(row, liquidoCandidates)
+
+		finalRows = append(finalRows, domain.AtoliniRecebimentosOutputRow{
+			Data:             sanitizeForCSV(effectiveDateSanitized),
+			DescricaoCredito: sanitizeForCSV(descCredito),
+			ContaCredito:     sanitizeForCSV(codCredito),
+			DescricaoDebito:  sanitizeForCSV(currentDescDebito),
+			ContaDebito:      sanitizeForCSV(currentCodDebito),
+			Historico:        historico,
+			ValorPrincipal:   sanitizeForCSV(svc.formatTwoDecimalsComma(vPrincipal)),
+			Juros:            sanitizeForCSV(svc.formatTwoDecimalsComma(vJuros)),
+			Desconto:         sanitizeForCSV(svc.formatTwoDecimalsComma(vDesc)),
+			DespBanco:        sanitizeForCSV(svc.formatTwoDecimalsComma(vDespBco)),
+			DespCartorio:     sanitizeForCSV(svc.formatTwoDecimalsComma(vDespCart)),
+			VlLiqPago:        sanitizeForCSV(svc.formatTwoDecimalsComma(vVlliq)),
+		})
 	}
 
 	return svc.gerarCSVAtoliniRecebimentos(finalRows)
 }
-
 func (svc *service) gerarCSVAtoliniRecebimentos(rows []domain.AtoliniRecebimentosOutputRow) ([]byte, error) {
 	var buffer bytes.Buffer
 	encoder := charmap.Windows1252.NewEncoder()
