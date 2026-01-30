@@ -151,9 +151,9 @@ func (h *ConverterHandler) HandleAtoliniPagamentosConversion(c *gin.Context) {
 		return
 	}
 
-	// CORREÇÃO: Lê os dois novos parâmetros de filtro
-	debitPrefixes := getPrefixesFromForm(c, "debitClassPrefixes")
-	creditPrefixes := getPrefixesFromForm(c, "creditClassPrefixes")
+	// Lê os parâmetros de filtro de classificação (padronizado com recebimentos)
+	debitPrefixes := getPrefixesFromForm(c, "debitPrefixes")
+	creditPrefixes := getPrefixesFromForm(c, "creditPrefixes")
 
 	excelFile, err := excelFileHeader.Open()
 	if err != nil {
