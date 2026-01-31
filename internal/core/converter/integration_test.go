@@ -40,8 +40,9 @@ func TestAtoliniPagamentosIntegration(t *testing.T) {
 	})
 
 	// Teste 2: Com filtros corretos para pagamentos
-	// debitPrefixes: ["2.1.1"] - para pegar fornecedores (Passivo)
-	// creditPrefixes: ["1.1.1"] - para pegar bancos (Ativo)
+	// NOVA SEMÂNTICA:
+	//   debitPrefixes = Ativo (1.x.x) → usado para buscar BANCOS (crédito contábil)
+	//   creditPrefixes = Passivo (2.x.x) → usado para buscar FORNECEDORES (débito contábil)
 	t.Run("Com filtros corretos", func(t *testing.T) {
 		// Reabrir arquivos para resetar o cursor
 		lancamentosFile2, _ := os.Open("../../../error_case/janeiro2026.xls")
@@ -49,8 +50,8 @@ func TestAtoliniPagamentosIntegration(t *testing.T) {
 		contasFile2, _ := os.Open("../../../error_case/contas.csv")
 		defer contasFile2.Close()
 
-		debitPrefixes := []string{"2.1.1"}
-		creditPrefixes := []string{"1.1.1"}
+		debitPrefixes := []string{"1.1.1"}   // Ativo - para bancos
+		creditPrefixes := []string{"2.1.1"}  // Passivo - para fornecedores
 
 		output, err := svc.ProcessAtoliniPagamentos(lancamentosFile2, contasFile2, debitPrefixes, creditPrefixes)
 		if err != nil {
@@ -81,16 +82,16 @@ func TestAtoliniPagamentosIntegration(t *testing.T) {
 		}
 	})
 
-	// Teste 3: Com filtros múltiplos para crédito (bancos tanto em Ativo quanto Passivo)
-	// Isso é útil quando há empréstimos bancários (Passivo) e contas correntes (Ativo)
+	// Teste 3: Com filtros múltiplos
+	// Útil quando há bancos tanto em Ativo (contas correntes) quanto Passivo (empréstimos)
 	t.Run("Com filtros múltiplos para bancos", func(t *testing.T) {
 		lancamentosFile3, _ := os.Open("../../../error_case/janeiro2026.xls")
 		defer lancamentosFile3.Close()
 		contasFile3, _ := os.Open("../../../error_case/contas.csv")
 		defer contasFile3.Close()
 
-		debitPrefixes := []string{"2.1.1"}
-		creditPrefixes := []string{"1.1.1", "2.1.1"}  // Aceita bancos tanto no Ativo quanto Passivo
+		debitPrefixes := []string{"1.1.1", "2.1.1"}  // Ativo + Passivo - para bancos em ambos
+		creditPrefixes := []string{"2.1.1"}          // Passivo - para fornecedores
 
 		output, err := svc.ProcessAtoliniPagamentos(lancamentosFile3, contasFile3, debitPrefixes, creditPrefixes)
 		if err != nil {

@@ -1165,6 +1165,13 @@ func loadAtoliniData[T1 any, T2 any](
 // ---------------------- ATOLINI - PAGAMENTOS (processamento) ----------------------
 
 // Ajustado para usar lerPlanoContasAtolini (mapa detalhado) e aplicar filtros: debitPrefixes / creditPrefixes.
+// ProcessAtoliniPagamentos converte lançamentos de pagamentos do formato Atolini.
+//
+// IMPORTANTE: Semântica dos parâmetros de filtro:
+//   - debitPrefixes: Filtro para contas do ATIVO (1.x.x) - usado para buscar BANCOS (crédito contábil)
+//   - creditPrefixes: Filtro para contas do PASSIVO (2.x.x) - usado para buscar FORNECEDORES (débito contábil)
+//
+// Nota: Os nomes dos parâmetros refletem a classificação do balanço, não a natureza da operação contábil.
 func (svc *service) ProcessAtoliniPagamentos(
 	excelFile io.Reader,
 	contasFile io.Reader,
@@ -1425,6 +1432,8 @@ func (svc *service) ProcessAtoliniPagamentos(
 		descCred, descCredUpper := pickBanco(row)
 
 		// 6) matching com CACHE
+		// NOTA: creditPrefixes = Passivo (2.x.x), debitPrefixes = Ativo (1.x.x)
+		// Para PAGAMENTOS: débito contábil = fornecedor (Passivo), crédito contábil = banco (Ativo)
 		var debID, credID string
 
 		if descDeb != "" {
@@ -1432,7 +1441,8 @@ func (svc *service) ProcessAtoliniPagamentos(
 			if id, ok := debCache[debKey]; ok {
 				debID = id
 			} else {
-				debID = svc.buscarContaAtolini(descDeb, contasMap, descricaoIndex, debitPrefixes)
+				// Fornecedor (débito contábil) está no Passivo → usa creditPrefixes
+				debID = svc.buscarContaAtolini(descDeb, contasMap, descricaoIndex, creditPrefixes)
 				debCache[debKey] = debID
 			}
 		}
@@ -1442,7 +1452,8 @@ func (svc *service) ProcessAtoliniPagamentos(
 			if id, ok := credCache[credKey]; ok {
 				credID = id
 			} else {
-				credID = svc.buscarContaAtolini(descCred, contasMap, descricaoIndex, creditPrefixes)
+				// Banco (crédito contábil) está no Ativo → usa debitPrefixes
+				credID = svc.buscarContaAtolini(descCred, contasMap, descricaoIndex, debitPrefixes)
 				credCache[credKey] = credID
 			}
 		}
@@ -1899,6 +1910,13 @@ func findLastPortadorBefore(sheet [][]string, idx int, lookback int) (string, bo
 	return "", false
 }
 
+// ProcessAtoliniRecebimentos converte lançamentos de recebimentos do formato Atolini.
+//
+// IMPORTANTE: Semântica dos parâmetros de filtro:
+//   - debitPrefixes: Filtro para contas do ATIVO (1.x.x) - usado para BANCOS e CLIENTES
+//   - creditPrefixes: Filtro para contas do PASSIVO (2.x.x) - usado se houver receitas no Passivo
+//
+// Nota: Para recebimentos, tanto débito (banco) quanto crédito (cliente) geralmente estão no Ativo.
 func (svc *service) ProcessAtoliniRecebimentos(excelFile io.Reader, contasFile io.Reader, debitPrefixes []string, creditPrefixes []string) ([]byte, error) {
 	descricaoIndex, contasMap, rows, err := loadAtoliniData(svc, excelFile, contasFile, svc.lerContasRecebimentos)
 	if err != nil {
@@ -2445,7 +2463,9 @@ func (svc *service) ProcessAtoliniRecebimentos(excelFile io.Reader, contasFile i
 			if cached, ok := credCache[key]; ok {
 				codCredito = cached
 			} else {
-				code := svc.findContaCodigoByDescricao(descCredito, descricaoIndex, contasMap, creditPrefixes)
+				// Cliente (crédito contábil em recebimentos) está no Ativo → usa debitPrefixes
+				// NOTA: Se houver receitas no Passivo, pode precisar usar creditPrefixes
+				code := svc.findContaCodigoByDescricao(descCredito, descricaoIndex, contasMap, debitPrefixes)
 				if code == "" {
 					code = "999999"
 				}
