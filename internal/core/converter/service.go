@@ -1486,7 +1486,7 @@ func (svc *service) gerarCSVAtoliniPagamentos(rows []domain.AtoliniPagamentosOut
 	writer.Comma = ';'
 
 	header := []string{"Data", "Debito", "Descição conta", "Credito", "Descrição Crédito", "Valor", "histórico", "Valor Original",
-		"Valor Juros", "Valor Multa", "Valor Desconto", "Valor Despesas", "Var Cam", "Valor Liq Pago Banco"}
+		"Valor Pago", "Valor Juros", "Valor Multa", "Valor Desconto", "Valor Despesas", "Var Cam", "Valor Liq Pago Banco"}
 	for i := range header {
 		header[i] = sanitizeForCSV(header[i])
 	}
